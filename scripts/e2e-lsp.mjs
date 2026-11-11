@@ -657,6 +657,65 @@ insertGlobal(
 	membersPath,
 	6,
 );
+// ORM-алиасы: `@return QueryResult` в файле с `use Result as QueryResult`.
+const ormResultFile = path.join(site, 'bitrix/modules/main/lib/orm/query/result.php');
+mkdirSync(path.dirname(ormResultFile), { recursive: true });
+writeFileSync(ormResultFile, ['<?php', 'namespace Bitrix\\Main\\ORM\\Query;', '', 'class Result', '{', '    public function fetch(): array|false', '    {', '        return false;', '    }', '}', ''].join('\n'));
+const ormLdapFile = path.join(site, 'bitrix/modules/ldap/lib/QueryResult.php');
+mkdirSync(path.dirname(ormLdapFile), { recursive: true });
+writeFileSync(ormLdapFile, ['<?php', 'namespace Bitrix\\Ldap;', '', 'final class QueryResult', '{', '    public function count(): int', '    {', '        return 0;', '    }', '}', ''].join('\n'));
+const ormDataManagerFile = path.join(site, 'bitrix/modules/main/lib/orm/data/datamanager.php');
+mkdirSync(path.dirname(ormDataManagerFile), { recursive: true });
+writeFileSync(ormDataManagerFile, [
+	'<?php',
+	'namespace Bitrix\\Main\\ORM\\Data;',
+	'',
+	'use Bitrix\\Main\\ORM\\Query\\Result as QueryResult;',
+	'',
+	'abstract class DataManager',
+	'{',
+	'    /** @return QueryResult */',
+	'    public static function getList(array $parameters = [])',
+	'    {',
+	'        return new \\Bitrix\\Main\\ORM\\Query\\Result();',
+	'    }',
+	'}',
+	'',
+].join('\n'));
+const ormTableFile = path.join(site, 'local/modules/demo/lib/orm_table.php');
+mkdirSync(path.dirname(ormTableFile), { recursive: true });
+writeFileSync(ormTableFile, ['<?php', 'namespace Vendor\\Demo\\Orm;', '', 'class OrmTable extends \\Bitrix\\Main\\ORM\\Data\\DataManager', '{', '}', ''].join('\n'));
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line) VALUES (?,?,?,?,?,?,?)',
+	'Bitrix\\Main\\ORM\\Query\\Result', 'Result', 'Bitrix\\Main\\ORM\\Query', 'class', 'main', ormResultFile, 5,
+);
+insertGlobal(
+	'INSERT INTO methods (class_fqcn, name, signature, return_type, params_json, is_static, visibility, file, line, doc) VALUES (?,?,?,?,?,?,?,?,?,?)',
+	'Bitrix\\Main\\ORM\\Query\\Result', 'fetch', 'fetch(): array|false', 'array|false', '[]', 0, 'public', ormResultFile, 7, '',
+);
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line) VALUES (?,?,?,?,?,?,?)',
+	'Bitrix\\Ldap\\QueryResult', 'QueryResult', 'Bitrix\\Ldap', 'class', 'ldap', ormLdapFile, 5,
+);
+insertGlobal(
+	'INSERT INTO methods (class_fqcn, name, signature, return_type, params_json, is_static, visibility, file, line, doc) VALUES (?,?,?,?,?,?,?,?,?,?)',
+	'Bitrix\\Ldap\\QueryResult', 'count', 'count(): int', 'int', '[]', 0, 'public', ormLdapFile, 7, '',
+);
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line) VALUES (?,?,?,?,?,?,?)',
+	'Bitrix\\Main\\ORM\\Data\\DataManager', 'DataManager', 'Bitrix\\Main\\ORM\\Data', 'class', 'main', ormDataManagerFile, 7,
+);
+insertGlobal(
+	'INSERT INTO methods (class_fqcn, name, signature, return_type, params_json, is_static, visibility, file, line, doc) VALUES (?,?,?,?,?,?,?,?,?,?)',
+	'Bitrix\\Main\\ORM\\Data\\DataManager', 'getList', 'getList(array $parameters = [])', 'QueryResult',
+	JSON.stringify([{ name: 'parameters', type: 'array', default: '[]', variadic: false, byRef: false }]),
+	1, 'public', ormDataManagerFile, 14, "/**\n * @return QueryResult\n */",
+);
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line, extends) VALUES (?,?,?,?,?,?,?,?)',
+	'Vendor\\Demo\\Orm\\OrmTable', 'OrmTable', 'Vendor\\Demo\\Orm', 'class', 'demo', ormTableFile, 5,
+	'Bitrix\\Main\\ORM\\Data\\DataManager',
+);
 // Стабы и vendor: класс из библиотеки и встроенная функция.
 const vendorFile = path.join(site, 'vendor/acme/lib/src/thing.php');
 mkdirSync(path.dirname(vendorFile), { recursive: true });
@@ -2355,6 +2414,40 @@ const stubDefinition = await waitFor((message) => message.id === stubDefinitionR
 check(
 	(Array.isArray(stubDefinition.result) ? stubDefinition.result.length : 1) === 0,
 	'PHP: у стаба нет файла — definition пустой, а не битый uri',
+);
+
+const ormUri = pathToFileURL(path.join(site, 'local/php_interface/orm_alias.php')).toString();
+const ormText = [
+	'<?php',
+	'namespace Vendor\\Demo;',
+	'',
+	'use Vendor\\Demo\\Orm\\OrmTable;',
+	'',
+	'$task = OrmTable::getList([\'select\' => [\'ID\']])->fetch();',
+	'',
+].join('\n');
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: ormUri, languageId: 'php', version: 1, text: ormText } },
+});
+const ormDiagnostics = await waitFor(
+	(message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === ormUri,
+);
+const ormCodes = (ormDiagnostics?.params?.diagnostics ?? []).map((item) => item.code);
+check(
+	!ormCodes.includes('bitrix.php.unknown-method'),
+	'PHP: @return QueryResult резолвится через use объявляющего класса',
+);
+const ormFetchRequest = request('textDocument/definition', {
+	textDocument: { uri: ormUri },
+	position: { line: 5, character: ormText.split('\n')[5].indexOf('fetch') + 2 },
+});
+send(ormFetchRequest);
+const ormFetch = await waitFor((message) => message.id === ormFetchRequest.id);
+check(
+	Array.isArray(ormFetch.result) && ormFetch.result[0]?.uri?.endsWith('/orm/query/result.php'),
+	'PHP: definition fetch() в цепочке ORM → Result',
 );
 
 send(request('shutdown', {}));

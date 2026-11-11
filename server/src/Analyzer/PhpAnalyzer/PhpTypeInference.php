@@ -14,6 +14,9 @@ final class PhpTypeInference
 {
 	private const MAX_DEPTH = 6;
 
+	/** @var array<string, array<string, string>> use-карты файлов объявлений (кэш) */
+	private array $fileUsesCache = [];
+
 	public function __construct(private readonly Repository $repository)
 	{
 	}
@@ -506,7 +509,8 @@ final class PhpTypeInference
 			foreach (array_filter($receivers) as $receiver) {
 				$property = $this->repository->findPropertyInHierarchy((string) $receiver, $propertyMatch[2]);
 				if ($property !== null) {
-					$result = array_merge($result, $this->typeCandidatesFor((string) ($property['type'] ?? ''), (string) $receiver, $context));
+					$owner = trim((string) ($property['class_fqcn'] ?? (string) $receiver));
+					$result = array_merge($result, $this->typeCandidatesFor((string) ($property['type'] ?? ''), $owner, $context));
 				}
 			}
 			return array_values(array_unique($result));
@@ -637,6 +641,13 @@ final class PhpTypeInference
 	 */
 	private function returnTypeCandidates(string $declaringClass, array $method, PhpDocumentContext $context): array
 	{
+		// Важно: тип объявлен в классе, где метод ОБЪЯВЛЕН (его namespace и use),
+		// а не в классе получателя — иначе алиасы вроде `use Result as QueryResult`
+		// не находятся у наследника.
+		$owner = trim((string) ($method['class_fqcn'] ?? ''));
+		if ($owner !== '') {
+			$declaringClass = $owner;
+		}
 		return $this->typeCandidatesFor((string) ($method['return_type'] ?? ''), $declaringClass, $context);
 	}
 
@@ -672,7 +683,7 @@ final class PhpTypeInference
 			if ($this->isBuiltin($part)) {
 				continue;
 			}
-			$picked = $this->pickClassForType($part, $namespace, $context);
+			$picked = $this->pickClassForType($part, $namespace, $context, $declaringClass);
 			if ($picked !== null) {
 				$result[] = $picked;
 			}
@@ -685,11 +696,25 @@ final class PhpTypeInference
 	 * алиасы документа → поиск по короткому имени → глобальное имя.
 	 * Глобальное `Item` может быть посторонним классом из другого файла.
 	 */
-	private function pickClassForType(string $part, string $namespace, PhpDocumentContext $context): ?string
-	{
+	private function pickClassForType(
+		string $part,
+		string $namespace,
+		PhpDocumentContext $context,
+		?string $declaringClass = null,
+	): ?string {
 		if (str_starts_with($part, '\\')) {
 			$absolute = ltrim($part, '\\');
 			return $this->repository->classByName($absolute) !== null ? $absolute : null;
+		}
+		// `@return QueryResult` в файле с `use ...Result as QueryResult`:
+		// имя резолвится в контексте ОБЪЯВЛЕНИЯ, а не по короткому имени
+		// (иначе `Bitrix\Ldap\QueryResult` перебивает `Bitrix\Main\ORM\Query\Result`).
+		$uses = $this->usesForClass($declaringClass);
+		if ($uses !== []) {
+			$resolved = PhpUseMap::resolve($part, $uses);
+			if ($resolved !== $part && $this->repository->classByName($resolved) !== null) {
+				return $resolved;
+			}
 		}
 		$ordered = [];
 		if ($namespace !== '' && !str_contains($part, '\\')) {
@@ -705,11 +730,35 @@ final class PhpTypeInference
 				return $candidate;
 			}
 		}
-		$short = $this->repository->findClassByShortName($part);
-		if ($short !== null) {
-			return (string) $short['fqcn'];
-		}
+		// Глобальные легаси-классы (`CFile`, `CDBResult`) ищем как есть.
+		// Поиск по короткому имени убран: он давал классы из чужих namespace.
 		return $this->repository->classByName($part) !== null ? $part : null;
+	}
+
+	/**
+	 * `use`-карта файла, где объявлен класс (кэш по FQCN).
+	 *
+	 * @return array<string, string>
+	 */
+	private function usesForClass(?string $declaringClass): array
+	{
+		if ($declaringClass === null || $declaringClass === '') {
+			return [];
+		}
+		$key = strtolower(ltrim($declaringClass, '\\'));
+		if (isset($this->fileUsesCache[$key])) {
+			return $this->fileUsesCache[$key];
+		}
+		$row = $this->repository->classByName(ltrim($declaringClass, '\\'));
+		$file = $row === null ? '' : (string) ($row['file'] ?? '');
+		$uses = [];
+		if ($file !== '' && !str_starts_with($file, '<')) {
+			$text = @file_get_contents($file);
+			if (is_string($text)) {
+				$uses = PhpUseMap::parse($text);
+			}
+		}
+		return $this->fileUsesCache[$key] = $uses;
 	}
 
 	/**
