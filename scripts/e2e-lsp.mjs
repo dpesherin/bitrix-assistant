@@ -657,6 +657,49 @@ insertGlobal(
 	membersPath,
 	6,
 );
+// Стабы и vendor: класс из библиотеки и встроенная функция.
+const vendorFile = path.join(site, 'vendor/acme/lib/src/thing.php');
+mkdirSync(path.dirname(vendorFile), { recursive: true });
+writeFileSync(vendorFile, ['<?php', 'namespace Acme\\Lib;', '', 'class Thing', '{', '    public function run(): void {}', '}', ''].join('\n'));
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line) VALUES (?,?,?,?,?,?,?)',
+	'Acme\\Lib\\Thing',
+	'Thing',
+	'Acme\\Lib',
+	'class',
+	null,
+	vendorFile,
+	5,
+);
+insertGlobal(
+	'INSERT INTO methods (class_fqcn, name, signature, return_type, params_json, is_static, visibility, file, line, doc) VALUES (?,?,?,?,?,?,?,?,?,?)',
+	'Acme\\Lib\\Thing',
+	'run',
+	'run(): void',
+	'void',
+	'[]',
+	0,
+	'public',
+	vendorFile,
+	7,
+	'',
+);
+insertGlobal(
+	'INSERT INTO php_functions (name, namespace, fqcn, signature, return_type, params_json, doc, deprecated, file, line) VALUES (?,?,?,?,?,?,?,?,?,?)',
+	'str_contains',
+	'',
+	'str_contains',
+	'str_contains(string $haystack, string $needle): bool',
+	'bool',
+	JSON.stringify([
+		{ name: 'haystack', type: 'string', variadic: false, byRef: false },
+		{ name: 'needle', type: 'string', variadic: false, byRef: false },
+	]),
+	'',
+	0,
+	'<phpstub>/str_contains.php',
+	1,
+);
 // Файлы для references: объявление на диске и вызов в соседнем файле.
 mkdirSync(path.dirname(methodFilePath), { recursive: true });
 writeFileSync(
@@ -2264,6 +2307,55 @@ check(
 	'PHP: formatting убирает пробелы в конце строки',
 );
 check(formatEdits[1]?.newText === '\n', 'PHP: formatting оставляет один перевод строки в конце');
+
+const stubUri = pathToFileURL(path.join(site, 'local/php_interface/stubs.php')).toString();
+const stubText = [
+	'<?php',
+	'namespace Vendor\\Demo;',
+	'',
+	'$ok = str_con;',
+	'$thing = new \\Acme\\Lib\\Thing();',
+	"$text = 'abc';",
+	'$found = str_contains($text, \'a\');',
+	'',
+].join('\n');
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: stubUri, languageId: 'php', version: 1, text: stubText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === stubUri);
+const stubsCompletionRequest = request('textDocument/completion', {
+	textDocument: { uri: stubUri },
+	position: { line: 3, character: 13 },
+});
+send(stubsCompletionRequest);
+const stubsCompletion = await waitFor((message) => message.id === stubsCompletionRequest.id);
+const stubItems = Array.isArray(stubsCompletion.result) ? stubsCompletion.result : (stubsCompletion.result?.items ?? []);
+check(
+	stubItems.some((item) => item.label === 'str_contains'),
+	'PHP: стабы в индексе — подсказка str_contains',
+);
+const vendorDefinitionRequest = request('textDocument/definition', {
+	textDocument: { uri: stubUri },
+	position: { line: 4, character: 18 },
+});
+send(vendorDefinitionRequest);
+const vendorDefinition = await waitFor((message) => message.id === vendorDefinitionRequest.id);
+check(
+	Array.isArray(vendorDefinition.result) && vendorDefinition.result[0]?.uri?.endsWith('/vendor/acme/lib/src/thing.php'),
+	'PHP: vendor-класс — переход к определению',
+);
+const stubDefinitionRequest = request('textDocument/definition', {
+	textDocument: { uri: stubUri },
+	position: { line: 6, character: 15 },
+});
+send(stubDefinitionRequest);
+const stubDefinition = await waitFor((message) => message.id === stubDefinitionRequest.id);
+check(
+	(Array.isArray(stubDefinition.result) ? stubDefinition.result.length : 1) === 0,
+	'PHP: у стаба нет файла — definition пустой, а не битый uri',
+);
 
 send(request('shutdown', {}));
 

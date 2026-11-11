@@ -65,6 +65,21 @@ untitled, расширение само переключает язык доку
 - Quick Fix: `CJSCore::Init(['lib'])`, `\Bitrix\Main\UI\Extension::load('lib')` для PHP
   и `BX.loadExt('lib')` для JS; для PHP — «Импортировать <FQCN>» по короткому имени
   класса из индекса (добавляет `use` после последнего `use`/`namespace`).
+- Навигация и анализ (PHP): `references` и `documentHighlight` (поиск по тексту
+  проиндексированных файлов, лимиты 4000 файлов / 400 результатов), `typeDefinition`
+  (переменная → присваивание/параметр/`$this`, метод → `return type`, `static` → тип
+  получателя), `implementation` и `typeHierarchy/*` (`Repository::descendantsOf()` /
+  `directChildrenOf()` + проверка иерархии), `callHierarchy/*` (входящие — текстовый поиск
+  с атрибуцией вызывающего, исходящие — разбор тела), `codeLens` (наследники,
+  переопределения), `inlayHint` (имена параметров).
+- Типы: `PhpTypeInference` — литералы, `new`, `@var`/`@param`/`@return`, `Foo[]`,
+  `array<Foo>`, `array{KEY: Foo[]}`, `foreach`/`$items[0]`, flow-narrowing после
+  `instanceof`/`assert`; для параметров работает и в обычных функциях
+  (`PhpDocumentContext::functionParamsAt`).
+- Правки: `rename` — только локальные переменные в текущем файле, с отказами при
+  вхождениях в строках, `compact()`, `$$var`, суперглобальных и занятом имени;
+  `formatting`/`rangeFormatting` — только хвостовые пробелы и один перевод строки в конце,
+  файлы с heredoc пропускаются; `documentLink` — существующие пути из `require`/`include`.
 
 ---
 
