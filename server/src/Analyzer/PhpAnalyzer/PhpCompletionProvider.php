@@ -112,6 +112,13 @@ final class PhpCompletionProvider
 		if (preg_match('/(?<![$\\\\:>])([A-Za-z_][A-Za-z0-9_]*)$/', $before, $matches) === 1) {
 			$prefix = $matches[1];
 			$prior = rtrim(substr($before, 0, strlen($before) - strlen($prefix)));
+			// Абсолютное имя или namespace-путь (`\\CF`, `\\Bitrix\\Main\\Lo`) —
+			// это позиция класса, её обрабатывает клиентский провайдер. Функции
+			// здесь не предлагаем: иначе на `\\CF` регулярка ниже начинала
+			// совпадение с середины имени (`F`) и отдавала функции `F*`.
+			if (preg_match('/[\\\\][A-Za-z0-9_\\\\]*$/', $before) === 1) {
+				return [];
+			}
 			if (preg_match('/(?:->|::|\\$|\b(?:new|function|class|interface|trait|enum|use|namespace|extends|implements|const|public|protected|private|static))$/i', $prior) !== 1) {
 				$items = $this->globalItems($document, $offset, $prefix);
 				// `str_con_`: точных совпадений нет. Чтобы виджет не показывал

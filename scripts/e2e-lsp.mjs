@@ -2384,6 +2384,26 @@ send({
 	params: { textDocument: { uri: stubUri, languageId: 'php', version: 1, text: stubText } },
 });
 await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === stubUri);
+const slashText = ['<?php', 'namespace Vendor\\Demo;', '', '$x = \\str_con;', ''].join('\n');
+const slashUri = pathToFileURL(path.join(site, 'local/php_interface/slash.php')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: slashUri, languageId: 'php', version: 1, text: slashText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === slashUri);
+const slashCompletionRequest = request('textDocument/completion', {
+	textDocument: { uri: slashUri },
+	position: { line: 3, character: 12 },
+});
+send(slashCompletionRequest);
+const slashCompletion = await waitFor((message) => message.id === slashCompletionRequest.id);
+const slashItems = Array.isArray(slashCompletion.result) ? slashCompletion.result : (slashCompletion.result?.items ?? []);
+check(
+	!slashItems.some((item) => item.label === 'str_contains'),
+	'PHP: после ведущего \\\\ не предлагаются функции (это позиция класса)',
+);
+
 const stubsCompletionRequest = request('textDocument/completion', {
 	textDocument: { uri: stubUri },
 	position: { line: 3, character: 13 },

@@ -88,7 +88,15 @@ export class PhpClassCompletionProvider implements vscode.CompletionItemProvider
 		const info = this.readImports(document);
 		const range = new vscode.Range(position.line, startChar, position.line, position.character);
 		const items: vscode.CompletionItem[] = [];
+		// Класс может встретиться дважды (ядро и local/modified_core_files):
+		// показываем один элемент на FQCN, иначе список забит одинаковыми именами.
+		const seen = new Set<string>();
 		for (const row of rows) {
+			const key = row.fqcn.toLowerCase();
+			if (seen.has(key)) {
+				continue;
+			}
+			seen.add(key);
 			items.push(this.createItem(row, range, { info, qualified, leadingSlash }));
 		}
 		return items;
@@ -105,9 +113,10 @@ export class PhpClassCompletionProvider implements vscode.CompletionItemProvider
 		const sameNamespace = (row.namespace ?? '') === info.namespace;
 		const item = new vscode.CompletionItem(row.name, vscode.CompletionItemKind.Class);
 		item.range = range;
-		// Правая колонка — модуль, серая подпись — пространство имён.
-		item.detail = row.module ? `${row.module}` : '';
-		setLabelDetails(item, { description: row.namespace ? row.namespace : 'глобальный' });
+		// Правая колонка — полный FQCN (видно, из какого namespace класс),
+		// серая подпись — модуль, чтобы не терять привязку к ядру/проекту.
+		item.detail = namespaced ? row.fqcn : 'глобальный класс';
+		setLabelDetails(item, { description: row.module ? row.module : '' });
 		// Уже импортированный класс — первым; затем классы текущего namespace.
 		item.sortText = `${imported ? '0' : sameNamespace ? '1' : '2'}_${row.name.toLowerCase()}_${row.fqcn}`;
 
