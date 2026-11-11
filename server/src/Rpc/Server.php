@@ -13,6 +13,7 @@ use BitrixLsp\Analyzer\JsAnalyzer\JsSignatureHelpProvider;
 use BitrixLsp\Analyzer\JsAnalyzer\LibraryResolver;
 use BitrixLsp\Analyzer\LibraryCheck\LibraryDiagnostics;
 use BitrixLsp\Analyzer\LibraryCheck\LibraryQuickFix;
+use BitrixLsp\Analyzer\PhpAnalyzer\PhpCodeLensProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpCompletionProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpDefinitionProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpDiagnostics;
@@ -56,6 +57,7 @@ final class Server
 	private readonly PhpTypeNavigation $phpNavigation;
 	private readonly PhpInlayHintProvider $phpInlayHints;
 	private readonly PhpRenameProvider $phpRename;
+	private readonly PhpCodeLensProvider $phpCodeLens;
 	private readonly PhpDiagnostics $phpDiagnostics;
 	private readonly PhpSignatureHelpProvider $phpSignatureHelp;
 	private readonly JsSignatureHelpProvider $jsSignatureHelp;
@@ -96,6 +98,7 @@ final class Server
 		$this->phpNavigation = new PhpTypeNavigation($this->repository, $methodResolver, $typeInference);
 		$this->phpInlayHints = new PhpInlayHintProvider($this->repository, $methodResolver);
 		$this->phpRename = new PhpRenameProvider();
+		$this->phpCodeLens = new PhpCodeLensProvider($this->repository);
 		$this->phpDiagnostics = new PhpDiagnostics(
 			$this->repository,
 			$this->config,
@@ -195,6 +198,9 @@ final class Server
 			case 'textDocument/rename':
 				$this->respond($id, $this->rename($params));
 				break;
+			case 'textDocument/codeLens':
+				$this->respond($id, $this->codeLens($params));
+				break;
 			case 'textDocument/signatureHelp':
 				$this->respond($id, $this->signatureHelp($params));
 				break;
@@ -243,6 +249,7 @@ final class Server
 				'renameProvider' => ['prepareProvider' => true],
 				'signatureHelpProvider' => ['triggerCharacters' => ['(', ','], 'retriggerCharacters' => [',']],
 				'codeActionProvider' => ['codeActionKinds' => ['quickfix']],
+				'codeLensProvider' => ['resolveProvider' => false],
 				'workspaceSymbolProvider' => true,
 				'documentSymbolProvider' => true,
 				'workspace' => ['workspaceFolders' => ['supported' => true, 'changeNotifications' => false]],
@@ -484,6 +491,22 @@ final class Server
 			$this->offset($document, $params),
 			(bool) ($context['includeDeclaration'] ?? true),
 		);
+	}
+
+	/**
+	 * Линзы «N наследников» / «N переопределений» над объявлениями.
+	 *
+	 * @param array<string, mixed> $params
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function codeLens(array $params): array
+	{
+		$document = $this->document($params);
+		if ($document === null || $document->languageId !== 'php') {
+			return [];
+		}
+		$range = is_array($params['range'] ?? null) ? $params['range'] : [];
+		return $this->phpCodeLens->provide($document, $range);
 	}
 
 	/**

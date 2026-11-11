@@ -22,6 +22,8 @@ final class Repository
 	private int $extensionsAt = 0;
 	/** @var array<string, array{0: int, 1: array<int, string>}> */
 	private array $resultKeyCache = [];
+	/** @var array<string, array{0: int, 1: array<int, array<string, mixed>>}> кэш потомков: fqcn => [время, строки] */
+	private array $descendantsCache = [];
 
 	public function __construct(
 		private ?string $dbPath,
@@ -35,6 +37,7 @@ final class Repository
 		$this->database = null;
 		$this->openedPath = null;
 		$this->extensions = null;
+		$this->descendantsCache = [];
 	}
 
 	/**
@@ -687,6 +690,12 @@ final class Repository
 		if ($start === '') {
 			return [];
 		}
+		// Индекс между запросами не меняется, а запрос не бесплатный (скан по LIKE).
+		$key = strtolower($start) . ':' . $limit;
+		$cached = $this->descendantsCache[$key] ?? null;
+		if ($cached !== null && time() - $cached[0] < 60) {
+			return $cached[1];
+		}
 		$result = [];
 		$seen = [strtolower($start) => true];
 		$queue = [$start];
@@ -719,6 +728,7 @@ final class Repository
 				}
 			}
 		}
+		$this->descendantsCache[$key] = [time(), $result];
 		return $result;
 	}
 

@@ -1359,6 +1359,46 @@ send(renameStringRequest);
 const renameStringResult = await waitFor((message) => message.id === renameStringRequest.id);
 check(renameStringResult.result === null, 'PHP: rename с недопустимым именем → отказ');
 
+const lensPath = path.join(site, 'local/php_interface/parent_worker.php');
+const lensUri = pathToFileURL(lensPath).toString();
+const lensText = [
+	'<?php',
+	'namespace Vendor\\Demo;',
+	'',
+	'class ParentWorker',
+	'{',
+	'    public function work(): void',
+	'    {',
+	'    }',
+	'}',
+	'',
+].join('\n');
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: lensUri, languageId: 'php', version: 1, text: lensText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === lensUri);
+
+const lensRequest = request('textDocument/codeLens', {
+	textDocument: { uri: lensUri },
+	range: { start: { line: 0, character: 0 }, end: { line: 20, character: 0 } },
+});
+send(lensRequest);
+const lensResult = await waitFor((message) => message.id === lensRequest.id);
+const lenses = Array.isArray(lensResult.result) ? lensResult.result : [];
+check(lenses.length === 2, 'PHP: codeLens — наследники класса и переопределение метода');
+check(
+	lenses[0]?.command?.title === '1 наследник' &&
+		lenses[0]?.range?.start?.line < lenses[1]?.range?.start?.line,
+	'PHP: codeLens «1 наследник» над классом',
+);
+check(
+	lenses[1]?.command?.title === '1 переопределение' &&
+		lenses[1]?.command?.arguments?.[2]?.[0]?.uri?.endsWith('/child_worker.php'),
+	'PHP: codeLens «переопределение» ведёт к реализации',
+);
+
 const foldingRequest = request('textDocument/foldingRange', { textDocument: { uri: methodUri } });
 send(foldingRequest);
 const foldingResult = await waitFor((message) => message.id === foldingRequest.id);
