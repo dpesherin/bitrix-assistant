@@ -110,6 +110,10 @@ final class PhpHoverProvider
 			$declaration .= ' extends ' . (string) $class['extends'];
 		}
 		$lines[] = HoverColor::signature($declaration);
+		$constructor = $this->constructorSignature((string) $class['fqcn']);
+		if ($constructor !== null) {
+			$lines[] = HoverColor::signature($constructor);
+		}
 		if (!empty($class['extends'])) {
 			$lines[] = "**Наследует:** `{$class['extends']}`";
 		}
@@ -591,5 +595,40 @@ final class PhpHoverProvider
 			'contents' => ['kind' => 'markdown', 'value' => self::renderSections($lines)],
 			'range' => $document->range($token['start'], $token['end']),
 		];
+	}
+
+	/**
+	 * Сигнатура конструктора класса: из индекса (включая предков), а если
+	 * цепочка упирается во встроенный класс PHP — оттуда.
+	 */
+	private function constructorSignature(string $fqcn): ?string
+	{
+		$method = $this->repository->findMethodInHierarchy($fqcn, '__construct');
+		if ($method !== null) {
+			return (string) ($method['signature'] ?? '__construct()');
+		}
+		$current = $fqcn;
+		$seen = [];
+		for ($guard = 0; $guard < 50; $guard++) {
+			if (isset($seen[$current])) {
+				break;
+			}
+			$seen[$current] = true;
+			$class = $this->repository->classByName($current);
+			if ($class === null) {
+				break;
+			}
+			$parent = $this->repository->parentClassName($class);
+			if ($parent === null) {
+				break;
+			}
+			$native = PhpNativeCatalog::constructorOf($parent);
+			if ($native !== null) {
+				return (string) $native['signature'];
+			}
+			$current = $parent;
+		}
+		$native = PhpNativeCatalog::constructorOf($fqcn);
+		return $native === null ? null : (string) $native['signature'];
 	}
 }

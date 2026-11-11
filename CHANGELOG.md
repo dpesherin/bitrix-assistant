@@ -3,6 +3,15 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версии — [SemVer](https://semver.org/lang/ru/).
 Ведём с текущей версии.
 
+## [0.3.4]
+
+### Исправлено
+
+- Hover по классу показывает конструктор: для индексируемых классов — из
+  иерархии (`StatusChanged` → `__construct(array $values = [])` от `AbstractModel`),
+  для наследников встроенных — из каталога PHP
+  (`NoEntityIdProvidedException` → `__construct(string $message = "", int $code = 0, ?\Throwable $previous = null)`).
+
 ## [0.3.3]
 
 ### Исправлено
