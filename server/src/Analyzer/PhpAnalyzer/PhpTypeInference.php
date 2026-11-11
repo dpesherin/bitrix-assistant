@@ -32,6 +32,10 @@ final class PhpTypeInference
 			return [];
 		}
 		$base = $this->baseCandidates($context, $variable, $offset, $depth);
+		$element = $this->elementCandidates($context, $variable, $offset);
+		if ($element !== []) {
+			$base = array_values(array_unique(array_merge($element, $base)));
+		}
 		$narrowed = $this->narrowedType($context, $variable, $offset);
 		if ($narrowed === null) {
 			return $base;
@@ -55,6 +59,183 @@ final class PhpTypeInference
 			return [];
 		}
 		return $this->expressionCandidates($context, $rhs, $offset, $depth + 1);
+	}
+
+	/**
+	 * Тип элемента массива: `foreach ($items as $item)` и `$first = $items[0]`,
+	 * где `$items` типизирован как `Foo[]` в `@var`/`@param`/`@return`.
+	 *
+	 * @return array<int, string>
+	 */
+	private function elementCandidates(PhpDocumentContext $context, string $variable, int $offset): array
+	{
+		$source = $this->foreachSource($context->masked(), $variable, $offset);
+		if ($source === null) {
+			$rhs = $this->assignmentRightHandSide($context->text(), $variable, $offset);
+			if ($rhs !== null && preg_match('/^(.+?)\s*\[/', $rhs, $match) === 1) {
+				$source = $match[1];
+			}
+		}
+		if ($source === null) {
+			return [];
+		}
+		$type = $this->elementTypeOf($context, $source, $offset);
+		if ($type === null) {
+			return [];
+		}
+		$candidates = [];
+		foreach ($context->classCandidates($type) as $candidate) {
+			if ($this->repository->classByName($candidate) !== null) {
+				$candidates[] = $candidate;
+			}
+		}
+		return $candidates;
+	}
+
+	/** Источник `foreach`: `foreach ($source as $key => $variable)`. */
+	private function foreachSource(string $masked, string $variable, int $offset): ?string
+	{
+		if (preg_match_all('/\bforeach\s*\(/', $masked, $matches, PREG_OFFSET_CAPTURE) === false) {
+			return null;
+		}
+		$source = null;
+		foreach ($matches[0] as $match) {
+			$open = $match[1] + strlen($match[0]) - 1;
+			$close = $this->matchingParen($masked, $open);
+			if ($close <= $open || $close >= $offset) {
+				continue;
+			}
+			$inside = substr($masked, $open + 1, $close - $open - 1);
+			$parts = preg_split('/\bas\b/', $inside, 2);
+			if (!is_array($parts) || count($parts) !== 2) {
+				continue;
+			}
+			$targets = [];
+			foreach (explode('=>', $parts[1]) as $target) {
+				if (preg_match('/&?\s*(\$[A-Za-z_][A-Za-z0-9_]*)/', $target, $targetMatch) === 1) {
+					$targets[] = $targetMatch[1];
+				}
+			}
+			if ($targets === [] || $targets[count($targets) - 1] !== '$' . $variable) {
+				continue;
+			}
+			$source = trim($parts[0]);
+		}
+		return $source;
+	}
+
+	/** Строка типа элемента массива для выражения-источника. */
+	private function elementTypeOf(PhpDocumentContext $context, string $source, int $offset): ?string
+	{
+		$source = trim($source);
+		$type = null;
+		if (preg_match('/^\$([A-Za-z_][A-Za-z0-9_]*)$/', $source, $match) === 1) {
+			$type = $this->docTypeOfVariable($context, $match[1], $offset);
+		} elseif (preg_match('/^\$this\s*->\s*([A-Za-z_][A-Za-z0-9_]*)$/', $source, $match) === 1) {
+			$class = $context->classAt($offset);
+			if ($class !== null) {
+				$property = $this->repository->findPropertyInHierarchy($class['fqcn'], $match[1]);
+				if ($property !== null) {
+					// В колонке только нативный тип (`array`), поэтому `@var Foo[]` точнее.
+					$type = self::annotationType((string) ($property['doc'] ?? ''), 'var')
+						?? trim((string) ($property['type'] ?? ''));
+				}
+			}
+		} elseif (preg_match('/^\$this\s*->\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)$/', $source, $match) === 1) {
+			$class = $context->classAt($offset);
+			if ($class !== null) {
+				$type = $this->docReturnType($class['fqcn'], $match[1]);
+			}
+		} elseif (preg_match('/^\$([A-Za-z_][A-Za-z0-9_]*)\s*->\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)$/', $source, $match) === 1) {
+			foreach ($this->variableCandidates($context, '$' . $match[1], $offset) as $receiver) {
+				$type = $this->docReturnType($receiver, $match[2]);
+				if ($type !== null) {
+					break;
+				}
+			}
+		}
+		if ($type === null) {
+			return null;
+		}
+		return self::elementTypeFromString($type);
+	}
+
+	/** `@var Foo[] $items` / `@param Foo[] $items` в документе до курсора. */
+	private function docTypeOfVariable(PhpDocumentContext $context, string $variable, int $offset): ?string
+	{
+		$text = $context->text();
+		$start = 0;
+		if (preg_match_all('/\bfunction\b/', substr($text, 0, $offset), $functions, PREG_OFFSET_CAPTURE) > 0 && $functions[0] !== []) {
+			$start = $functions[0][count($functions[0]) - 1][1]; // только текущая функция
+		}
+		$before = substr($text, $start, $offset - $start);
+		$type = null;
+		foreach (['var', 'param'] as $tag) {
+			if (preg_match_all('/@' . $tag . '\s+(\S+)\s+\$' . preg_quote($variable, '/') . '\b/', $before, $matches) !== false && $matches[1] !== []) {
+				$type = $matches[1][count($matches[1]) - 1];
+			}
+		}
+		return $type;
+	}
+
+	/** `@return Foo[]` у метода из индекса. */
+	private function docReturnType(string $class, string $method): ?string
+	{
+		$row = $this->repository->findMethodInHierarchy($class, $method);
+		if ($row === null) {
+			return null;
+		}
+		$type = self::annotationType((string) ($row['doc'] ?? ''), 'return');
+		return $type;
+	}
+
+	private static function annotationType(string $doc, string $tag): ?string
+	{
+		if (preg_match('/@' . $tag . '\s+(\S+)/', $doc, $match) !== 1) {
+			return null;
+		}
+		return trim($match[1]);
+	}
+
+	/** `Foo[]`, `array<Foo>`, `list<Foo>` → `Foo`; union перебирается слева направо. */
+	private static function elementTypeFromString(string $type): ?string
+	{
+		foreach (explode('|', $type) as $part) {
+			$part = trim($part);
+			$part = ltrim($part, '?');
+			$part = rtrim($part, ',');
+			if (preg_match('/^(?:array|list|iterable)<(.+)>$/i', $part, $match) === 1) {
+				$inner = trim($match[1]);
+				if (str_contains($inner, ',')) {
+					$inner = trim(substr($inner, strrpos($inner, ',') + 1));
+				}
+				return $inner !== '' && $inner !== $part ? $inner : null;
+			}
+			if (preg_match('/^(.+)\[\]$/', $part, $match) === 1) {
+				$inner = trim($match[1]);
+				if ($inner !== '' && $inner !== 'array' && $inner !== 'mixed') {
+					return $inner;
+				}
+			}
+		}
+		return null;
+	}
+
+	private function matchingParen(string $text, int $open): int
+	{
+		$depth = 0;
+		$length = strlen($text);
+		for ($i = $open; $i < $length; $i++) {
+			if ($text[$i] === '(') {
+				$depth++;
+			} elseif ($text[$i] === ')') {
+				$depth--;
+				if ($depth === 0) {
+					return $i;
+				}
+			}
+		}
+		return $length;
 	}
 
 	/**

@@ -1359,6 +1359,52 @@ send(renameStringRequest);
 const renameStringResult = await waitFor((message) => message.id === renameStringRequest.id);
 check(renameStringResult.result === null, 'PHP: rename с недопустимым именем → отказ');
 
+const genericsText = [
+	'<?php',
+	'namespace Vendor\\Demo;',
+	'',
+	'function collect(): void',
+	'{',
+	'    /** @var \\Vendor\\Demo\\ParentWorker[] $workers */',
+	'    $workers = [];',
+	'    foreach ($workers as $worker) {',
+	'        $worker->work();',
+	'    }',
+	'    $first = $workers[0];',
+	'    $first->work();',
+	'}',
+	'',
+].join('\n');
+const genericsUri = pathToFileURL(path.join(site, 'local/php_interface/generics.php')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: genericsUri, languageId: 'php', version: 1, text: genericsText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === genericsUri);
+
+const foreachTypeRequest = request('textDocument/typeDefinition', {
+	textDocument: { uri: genericsUri },
+	position: { line: 8, character: 10 },
+});
+send(foreachTypeRequest);
+const foreachType = await waitFor((message) => message.id === foreachTypeRequest.id);
+check(
+	Array.isArray(foreachType.result) && foreachType.result[0]?.uri?.endsWith('/parent_worker.php'),
+	'PHP: тип элемента массива в foreach по @var Foo[]',
+);
+
+const indexTypeRequest = request('textDocument/typeDefinition', {
+	textDocument: { uri: genericsUri },
+	position: { line: 11, character: 10 },
+});
+send(indexTypeRequest);
+const indexType = await waitFor((message) => message.id === indexTypeRequest.id);
+check(
+	Array.isArray(indexType.result) && indexType.result[0]?.uri?.endsWith('/parent_worker.php'),
+	'PHP: тип элемента при `$items[0]` по @var Foo[]',
+);
+
 const lensPath = path.join(site, 'local/php_interface/parent_worker.php');
 const lensUri = pathToFileURL(lensPath).toString();
 const lensText = [
