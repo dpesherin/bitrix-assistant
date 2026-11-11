@@ -24,6 +24,10 @@ tsconfig.json
 **/*.vsix
 # Скриншоты и служебные файлы в корне репозитория
 *.png
+media/*.png
 !media/icon.png
+# Исходники иконок и демо-материалы для README в пакет не нужны
+media/logo.png
+media/readme/**
 package-lock.json
 server/bin/.gitkeep
