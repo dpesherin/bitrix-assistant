@@ -18,22 +18,30 @@ jobs:
             key: linux-x64
             spc: spc-linux-x86_64
             binary: php-linux-x64
+            arch: x86_64
           - os: ubuntu-24.04-arm
             key: linux-arm64
             spc: spc-linux-aarch64
             binary: php-linux-arm64
-          - os: macos-13
+            arch: aarch64
+          # macos-13 и macos-14 выведены из GitHub Actions: macos-14 теперь
+          # только x64 и в deprecated. arm64 — macos-15/macos-latest,
+          # x64 — macos-15-intel.
+          - os: macos-15-intel
             key: darwin-x64
             spc: spc-macos-x86_64
             binary: php-darwin-x64
-          - os: macos-14
+            arch: x86_64
+          - os: macos-15
             key: darwin-arm64
             spc: spc-macos-aarch64
             binary: php-darwin-arm64
+            arch: arm64
           - os: windows-2022
             key: win32-x64
             spc: spc-windows-x64.exe
             binary: php-win32-x64.exe
+            arch: x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -44,9 +52,33 @@ jobs:
           curl -#fSL "https://dl.static-php.dev/v3/spc-bin/nightly/${{ matrix.spc }}" -o spc
           chmod +x spc || true
 
+      - name: Check runner architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(uname -m)"
+          expected="${{ matrix.arch }}"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "Раннер ${{ matrix.os }} отдал архитектуру $actual, ожидали $expected — бинарник был бы чужой." >&2
+            exit 1
+          fi
+          echo "Архитектура $actual ✓"
+
       - name: Check build environment
         shell: bash
         run: ./spc doctor --auto-fix
+
+      # pcntl и posix не поддерживаются в static-php-cli на Windows —
+      # для win32-* убираем их из craft.yml (сервер их не использует).
+      - name: Prepare craft.yml for platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.key }}" == win32-* ]]; then
+            sed -i.bak -e 's/^\(extensions:.*\),pcntl,posix$/\1/' craft.yml
+            rm -f craft.yml.bak
+          fi
+          grep -n '^extensions' craft.yml
 
       - name: Build PHP (craft.yml)
         shell: bash
@@ -66,8 +98,25 @@ jobs:
       - name: Smoke test
         shell: bash
         run: |
-          "server/bin/${{ matrix.binary }}" -v
-          "server/bin/${{ matrix.binary }}" -m | grep -Ei 'pdo_sqlite|sqlite3|mbstring|tokenizer|phar|pcntl'
+          set -euo pipefail
+          bin="server/bin/${{ matrix.binary }}"
+          "$bin" -v
+          mods="$("$bin" -m | tr -d '\r')"
+          for ext in pdo_sqlite sqlite3 mbstring tokenizer phar; do
+            if ! grep -qix "$ext" <<<"$mods"; then
+              echo "Нет обязательного расширения: $ext" >&2
+              exit 1
+            fi
+          done
+          if [[ "${{ matrix.key }}" != win32-* ]]; then
+            for ext in pcntl posix; do
+              if ! grep -qix "$ext" <<<"$mods"; then
+                echo "Нет расширения $ext для ${{ matrix.key }}" >&2
+                exit 1
+              fi
+            done
+          fi
+          echo "Расширения в порядке"
 
       - uses: actions/upload-artifact@v4
         with:
