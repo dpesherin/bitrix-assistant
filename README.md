@@ -159,5 +159,5 @@
 
 ## Обратная связь
 
-- Ошибки и пожелания: <https://github.com/pesherind/bitrix-assistant/issues>
+- Ошибки и пожелания: <https://github.com/dpesherin/bitrix-assistant/issues>
 - Лицензия: MIT.

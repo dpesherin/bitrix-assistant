@@ -4,7 +4,7 @@ name: Publish extension
 #
 # Перед первым запуском:
 #   1. Marketplace → publisher pesherind → Trusted Publishing → Create:
-#        repository owner: pesherind
+#        repository owner: dpesherin
 #        repository:       bitrix-assistant
 #        workflow:         publish.yml
 #        environment:      marketplace

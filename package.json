@@ -533,12 +533,12 @@
 	"icon": "media/icon.png",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/pesherind/bitrix-assistant.git"
+		"url": "https://github.com/dpesherin/bitrix-assistant.git"
 	},
 	"bugs": {
-		"url": "https://github.com/pesherind/bitrix-assistant/issues"
+		"url": "https://github.com/dpesherin/bitrix-assistant/issues"
 	},
-	"homepage": "https://github.com/pesherind/bitrix-assistant#readme",
+	"homepage": "https://github.com/dpesherin/bitrix-assistant#readme",
 	"galleryBanner": {
 		"color": "#0b4a6f",
 		"theme": "dark"
