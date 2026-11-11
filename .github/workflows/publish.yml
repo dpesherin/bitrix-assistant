@@ -92,6 +92,8 @@ jobs:
       - name: Tests
         run: npm test
 
+      # В пакет каждой платформы кладём только её PHP-бинарник: со всеми
+      # пятью VSIX выходит ~124 МБ вместо 10–80 МБ.
       - name: Publish per platform
         env:
           INPUT_VERSION: ${{ inputs.version }}
@@ -101,7 +103,19 @@ jobs:
           version="${INPUT_VERSION:-$(node -p "require('./package.json').version")}"
           targets="${INPUT_TARGETS:-darwin-arm64,darwin-x64,linux-x64,linux-arm64,win32-x64}"
           echo "Версия: $version"
+
+          stash="$(mktemp -d)"
+          cp server/bin/php-* "$stash"/
           for target in ${targets//,/ }; do
-            echo "==> $target"
-            npx --yes @vscode/vsce publish --oidc --target "$target" "$version"
+            keep="php-$target"
+            [[ "$target" == win32-* ]] && keep="php-$target.exe"
+            if [[ ! -f "$stash/$keep" ]]; then
+              echo "Нет бинарника $keep — платформа $target пропущена" >&2
+              exit 1
+            fi
+            rm -f server/bin/php-*
+            cp "$stash/$keep" server/bin/
+            echo "==> $target ($keep)"
+            npx --yes @vscode/vsce publish --oidc --target "$target" "$version" \
+              --no-git-tag-version --no-update-package-json
           done
