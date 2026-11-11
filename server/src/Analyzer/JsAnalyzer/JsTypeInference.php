@@ -18,10 +18,13 @@ final class JsTypeInference
 
 	public function classFromNewExpression(string $before): ?string
 	{
-		if (preg_match('/\bnew\s+\\\\?([A-Za-z_$][\w$\\\\]*)\s*\([^()]*\)\s*\.\s*$/', $before, $match) !== 1) {
+		if (preg_match('/\bnew\s+\\\\?([A-Za-z_$][\w$\\\\]*(?:\.[A-Za-z_$][\w$]*)*)\s*\([^()]*\)\s*\.\s*$/', $before, $match) !== 1) {
 			return null;
 		}
 		$class = $match[1];
+		if (str_contains($class, '.')) {
+			return $class; // BX.Main.Popup — путь по сегментам индекса
+		}
 		$position = strrpos($class, '\\');
 		return $position === false ? $class : substr($class, $position + 1);
 	}
@@ -32,7 +35,7 @@ final class JsTypeInference
 			return null;
 		}
 		$pattern = '/\\b(?:const|let|var)\\s+' . preg_quote($variable, '/')
-			. '\\s*=\\s*new\\s+\\\\?([A-Za-z_$][\\w$\\\\]*)/';
+			. '\\s*=\\s*new\\s+\\\\?([A-Za-z_$][\\w$\\\\]*(?:\\.[A-Za-z_$][\\w$]*)*)/';
 		if (preg_match_all($pattern, $document->text, $matches, PREG_OFFSET_CAPTURE) === false) {
 			return null;
 		}
@@ -94,6 +97,10 @@ final class JsTypeInference
 
 	private function resolveName(TextDocument $document, string $class): string
 	{
+		// Путь по сегментам (`BX.Main.Popup`) — не имя из namespace/импортов.
+		if (str_contains($class, '.')) {
+			return $class;
+		}
 		$position = strrpos($class, '\\');
 		$short = $position === false ? $class : substr($class, $position + 1);
 		$resolved = $this->modules->resolve($document, $short);

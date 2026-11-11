@@ -166,10 +166,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<Active
 		vscode.commands.registerCommand('bitrix.php.downloadRuntime', () => ext.phpSyntax.downloadSelected()),
 		vscode.commands.registerCommand('bitrix.php.manageRuntimes', () => ext.phpSyntax.manageRuntimes()),
 		vscode.commands.registerCommand('bitrix.php.lintWorkspace', () => ext.phpSyntax.lintWorkspace()),
-		vscode.commands.registerCommand('bitrix.ssh.refresh', () => {
-			ext.tree.refresh();
-			ext.indexView.refresh();
-		}),
 		vscode.commands.registerCommand('bitrix.showMenu', () => showMenu(ext)),
 		vscode.commands.registerCommand('bitrix.showLog', () => showLog()),
 		vscode.commands.registerCommand('bitrix.index.rebuild', () => runIndexCommand(ext, true)),

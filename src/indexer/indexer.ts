@@ -628,6 +628,9 @@ export class BitrixIndexer implements vscode.Disposable {
 			path.join(layout.localDir, 'components'),
 			path.join(layout.bitrixDir, 'php_interface'),
 			path.join(layout.localDir, 'php_interface'),
+			// Весь local: в проектах встречаются свои каталоги (local/testing,
+			// local/lib, local/api и т.п.) — их классы тоже должны попадать в индекс.
+			layout.localDir,
 		);
 		for (const root of roots) {
 			if (isDirectory(root)) {
@@ -637,6 +640,15 @@ export class BitrixIndexer implements vscode.Disposable {
 			}
 		}
 		out.sort();
+		// Дедупликация: layout.localDir пересекается с уже добавленными каталогами.
+		const unique: string[] = [];
+		for (const file of out) {
+			if (unique[unique.length - 1] !== file) {
+				unique.push(file);
+			}
+		}
+		out.length = 0;
+		out.push(...unique);
 	}
 
 	private async collectJsFiles(

@@ -14,6 +14,9 @@ final class PhpSemanticDiagnostics
 {
 	private const MAX = 30;
 
+	/** Только проверки существования символов (работают без bitrix.php.semantic). */
+	private bool $symbolsOnly = false;
+
 	/** @var array<string, array<int, string>> */
 	private const ADDED_FUNCTIONS = [
 		'8.2' => ['ini_parse_quantity', 'memory_reset_peak_usage', 'mysqli_execute_query', 'openssl_cipher_key_length'],
@@ -36,6 +39,22 @@ final class PhpSemanticDiagnostics
 	/**
 	 * @return array<int, array<string, mixed>>
 	 */
+	/**
+	 * Неизвестные функции/методы — базовая проверка, включена всегда:
+	 * такие ошибки видны в Problems независимо от `bitrix.php.semantic`.
+	 *
+	 * @return array<int, array<string, mixed>>
+	 */
+	public function checkSymbols(TextDocument $document): array
+	{
+		$this->symbolsOnly = true;
+		try {
+			return $this->check($document);
+		} finally {
+			$this->symbolsOnly = false;
+		}
+	}
+
 	public function check(TextDocument $document): array
 	{
 		$masked = JsScanner::maskCode(PhpSource::phpOnly($document->text), true);
@@ -98,10 +117,12 @@ final class PhpSemanticDiagnostics
 					}
 					continue;
 				}
-				$diagnostics = array_merge(
-					$diagnostics,
-					$this->checkArguments($document, $function, $open, $close, $name),
-				);
+				if (!$this->symbolsOnly) {
+					$diagnostics = array_merge(
+						$diagnostics,
+						$this->checkArguments($document, $function, $open, $close, $name),
+					);
+				}
 				if (count($diagnostics) >= self::MAX) {
 					return array_slice($diagnostics, 0, self::MAX);
 				}
@@ -129,16 +150,18 @@ final class PhpSemanticDiagnostics
 				if ($close <= $open) {
 					continue;
 				}
-				$diagnostics = array_merge(
-					$diagnostics,
-					$this->checkArguments(
-						$document,
-						$reference['method'],
-						$open,
-						$close,
-						(string) $reference['method']['name'],
-					),
-				);
+				if (!$this->symbolsOnly) {
+					$diagnostics = array_merge(
+						$diagnostics,
+						$this->checkArguments(
+							$document,
+							$reference['method'],
+							$open,
+							$close,
+							(string) $reference['method']['name'],
+						),
+					);
+				}
 				if (count($diagnostics) >= self::MAX) {
 					break;
 				}
@@ -175,8 +198,10 @@ final class PhpSemanticDiagnostics
 			}
 		}
 
-		$diagnostics = array_merge($diagnostics, $this->checkReturnTypes($document, $masked));
-		$diagnostics = array_merge($diagnostics, $this->undefinedVariables($document, $masked));
+		if (!$this->symbolsOnly) {
+			$diagnostics = array_merge($diagnostics, $this->checkReturnTypes($document, $masked));
+			$diagnostics = array_merge($diagnostics, $this->undefinedVariables($document, $masked));
+		}
 		return array_slice($diagnostics, 0, self::MAX);
 	}
 
@@ -196,7 +221,23 @@ final class PhpSemanticDiagnostics
 			return null;
 		}
 		$class = ltrim($target['class'], '\\');
-		if ($class === '' || $this->repository->classByName($class) === null) {
+		if ($class === '') {
+			return null;
+		}
+		if ($this->repository->classByName($class) === null) {
+			// Класс объявлен в этом же (ещё не проиндексированном) файле:
+			// проверяем по тексту документа, иначе молчим.
+			$context = PhpDocumentContext::create($document);
+			$local = $context->classAt($nameOffset);
+			if ($local === null || strcasecmp(ltrim($local['fqcn'], '\\'), $class) !== 0) {
+				return null;
+			}
+			if (preg_match('/function\s+&?\s*' . preg_quote($name, '/') . '\s*\(/i', $document->text) === 1) {
+				return null;
+			}
+		}
+		$row = $this->repository->classByName($class);
+		if ($row !== null && stripos((string) ($row['doc'] ?? ''), '@method') !== false) {
 			return null;
 		}
 		$magic = $target['operator'] === '::' ? '__callStatic' : '__call';

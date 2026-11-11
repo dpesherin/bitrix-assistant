@@ -64,9 +64,14 @@ final class PhpDiagnostics
 		}
 
 		$diagnostics = array_merge($diagnostics, $this->unresolvedClassDiagnostics($document, $uses));
-		if ($this->config->phpSemantic) {
-			$diagnostics = array_merge($diagnostics, $this->semantic->check($document));
-		}
+		// Неизвестные функции/методы показываем всегда; остальные семантические
+		// проверки (аргументы, типы, неопределённые переменные) — по настройке.
+		$diagnostics = array_merge(
+			$diagnostics,
+			$this->config->phpSemantic
+				? $this->semantic->check($document)
+				: $this->semantic->checkSymbols($document),
+		);
 		return array_merge($diagnostics, $this->parameterDiagnostics($document));
 	}
 
