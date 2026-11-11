@@ -677,6 +677,39 @@ final class Repository
 	}
 
 	/**
+	 * Является ли класс наследником/реализацией `$target` (обход extends,
+	 * implements и трейтов по индексу). Сравнение без учёта регистра.
+	 */
+	public function classIsA(string $class, string $target): bool
+	{
+		$target = strtolower(ltrim($target, '\\'));
+		if ($target === '') {
+			return false;
+		}
+		$queue = [ltrim($class, '\\')];
+		$seen = [];
+		while ($queue !== [] && count($seen) < 64) {
+			$current = array_shift($queue);
+			$key = strtolower($current);
+			if (isset($seen[$key])) {
+				continue;
+			}
+			$seen[$key] = true;
+			if ($key === $target) {
+				return true;
+			}
+			$row = $this->classByName($current);
+			if ($row === null) {
+				continue;
+			}
+			foreach ($this->directAncestors($row) as $ancestor) {
+				$queue[] = $ancestor;
+			}
+		}
+		return false;
+	}
+
+	/**
 	 * Прямые предки: extends + implements + traits (имена разрешены по namespace).
 	 *
 	 * @param array<string, mixed> $class

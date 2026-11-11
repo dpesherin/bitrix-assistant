@@ -14,6 +14,12 @@ final class PhpSemanticDiagnostics
 {
 	private const MAX = 30;
 
+	/** `declare(strict_types=1)` в текущем документе: приведение скаляров запрещено. */
+	private bool $strictTypes = false;
+
+	/** @var array<string, array<string, string>> use-карты файлов объявлений (кэш) */
+	private array $declaringUses = [];
+
 	/** Только проверки существования символов (работают без bitrix.php.semantic). */
 	private bool $symbolsOnly = false;
 
@@ -58,6 +64,8 @@ final class PhpSemanticDiagnostics
 	public function check(TextDocument $document): array
 	{
 		$masked = JsScanner::maskCode(PhpSource::phpOnly($document->text), true);
+		$this->strictTypes = preg_match('/\bdeclare\s*\(\s*strict_types\s*=\s*1\s*\)/', $masked) === 1;
+		$context = PhpDocumentContext::create($document);
 		$diagnostics = [];
 		$seen = [];
 		$builtins = array_fill_keys(array_map('strtolower', get_defined_functions()['internal'] ?? []), true);
@@ -120,7 +128,7 @@ final class PhpSemanticDiagnostics
 				if (!$this->symbolsOnly) {
 					$diagnostics = array_merge(
 						$diagnostics,
-						$this->checkArguments($document, $function, $open, $close, $name),
+						$this->checkArguments($document, $function, $open, $close, $name, $context),
 					);
 				}
 				if (count($diagnostics) >= self::MAX) {
@@ -166,6 +174,7 @@ final class PhpSemanticDiagnostics
 							$open,
 							$close,
 							(string) $reference['method']['name'],
+							$context,
 						),
 					);
 				}
@@ -206,7 +215,7 @@ final class PhpSemanticDiagnostics
 		}
 
 		if (!$this->symbolsOnly) {
-			$diagnostics = array_merge($diagnostics, $this->checkReturnTypes($document, $masked));
+			$diagnostics = array_merge($diagnostics, $this->checkReturnTypes($document, $masked, $context));
 			$diagnostics = array_merge($diagnostics, $this->undefinedVariables($document, $masked));
 		}
 		return array_slice($diagnostics, 0, self::MAX);
@@ -262,30 +271,10 @@ final class PhpSemanticDiagnostics
 		];
 	}
 
-	/** Наследник ли класс (по цепочке extends в индексе). */
+	/** Наследник ли класс (extends/implements/traits по индексу). */
 	private function isSubclassOf(string $class, string $parent): bool
 	{
-		$current = $class;
-		$seen = [];
-		for ($guard = 0; $guard < 25; $guard++) {
-			if (isset($seen[$current])) {
-				return false;
-			}
-			$seen[$current] = true;
-			$row = $this->repository->classByName($current);
-			if ($row === null) {
-				return false;
-			}
-			$next = $this->repository->parentClassName($row);
-			if ($next === null || $next === '') {
-				return false;
-			}
-			if (strcasecmp(ltrim($next, '\\'), $parent) === 0) {
-				return true;
-			}
-			$current = ltrim($next, '\\');
-		}
-		return false;
+		return $this->repository->classIsA($class, $parent);
 	}
 
 	/**
@@ -342,6 +331,9 @@ final class PhpSemanticDiagnostics
 	}
 
 	/**
+	 * Типы аргументов: скаляры с учётом `strict_types`, классы — с учётом
+	 * иерархии (`new Child()` подходит для параметра `Parent`), nullability.
+	 *
 	 * @param array<string, mixed> $callable
 	 * @return array<int, array<string, mixed>>
 	 */
@@ -351,6 +343,7 @@ final class PhpSemanticDiagnostics
 		int $open,
 		int $close,
 		string $name,
+		PhpDocumentContext $context,
 	): array {
 		$params = json_decode((string) ($callable['params_json'] ?? '[]'), true);
 		if (!is_array($params)) {
@@ -385,35 +378,238 @@ final class PhpSemanticDiagnostics
 			];
 		}
 		$diagnostics = [];
+		$selfClass = $context->classAt($open)['fqcn'] ?? null;
+		[$callableNamespace, $callableUses] = $this->declaringContext($callable);
 		foreach ($args as $index => $arg) {
 			$param = $params[$index] ?? null;
 			if (!is_array($param)) {
 				break;
 			}
 			$expected = trim((string) ($param['type'] ?? ''));
+			if ($expected === '') {
+				continue;
+			}
+			$allowed = $this->typeList($expected);
+			$nullable = str_starts_with(trim($expected), '?') || in_array('null', $allowed, true);
 			$actual = $this->literalType($arg);
-			if ($expected === '' || $actual === null) {
+			if ($actual === 'null') {
+				if ($nullable) {
+					continue;
+				}
+			}
+			$actualName = $actual;
+			if ($actual !== null) {
+				$ok = $this->scalarAllows($allowed, $actual, $arg, $this->strictTypes);
+			} else {
+				$newClass = $this->classOfNew($arg, $context);
+				if ($newClass === null) {
+					continue; // тип аргумента неизвестен — молчим
+				}
+				$ok = $this->classAllows($allowed, $newClass, $context, $selfClass, $callableNamespace, $callableUses);
+				$actualName = $newClass;
+			}
+			if ($ok) {
 				continue;
 			}
-			$allowed = array_map(
-				static fn (string $type): string => strtolower(trim($type, " \\t\\n\\r?()")),
-				preg_split('/[|&]/', $expected) ?: [],
+			$message = sprintf('%s(): аргумент %d ожидает %s, передан %s.', $name, $index + 1, $expected, $actualName);
+			if ($actual !== null && $this->strictTypes && $this->scalarAllows($allowed, $actual, $arg, false)) {
+				$message .= ' Документ объявлен со strict_types=1 — приведение скалярных типов запрещено.';
+			}
+			$diagnostics[] = $this->warning(
+				$document,
+				$open + 1,
+				$close,
+				$message,
+				'bitrix.php.argument-type',
+				['kind' => 'argument-type', 'name' => $name],
 			);
-			if ($actual === 'int' && in_array('float', $allowed, true)) {
-				continue;
-			}
-			if (!in_array($actual, $allowed, true) && !in_array('mixed', $allowed, true)) {
-				$diagnostics[] = $this->warning(
-					$document,
-					$open + 1,
-					$close,
-					sprintf('%s(): аргумент %d ожидает %s, передан %s.', $name, $index + 1, $expected, $actual),
-					'bitrix.php.argument-type',
-					['kind' => 'argument-type', 'name' => $name],
-				);
-			}
 		}
 		return $diagnostics;
+	}
+
+	/**
+	 * Разбор строки типа в список имён (`?Foo`, `Foo|null`, `A&B`).
+	 *
+	 * @return array<int, string>
+	 */
+	private function typeList(string $expected): array
+	{
+		$result = [];
+		foreach (preg_split('/[|&]/', $expected) ?: [] as $part) {
+			$part = trim($part, " \t\n\r?() ");
+			if ($part !== '') {
+				$result[] = $part;
+			}
+		}
+		return $result;
+	}
+
+	/**
+	 * Скалярное соответствие: в coercive-режиме PHP приводит числовые строки,
+	 * int/float и скаляры к string/bool; со strict_types — только точное совпадение.
+	 *
+	 * @param array<int, string> $allowed
+	 */
+	private function scalarAllows(array $allowed, string $actual, string $literal, bool $strict): bool
+	{
+		$allowed = array_map('strtolower', $allowed);
+		if (in_array('mixed', $allowed, true) || in_array($actual, $allowed, true)) {
+			return true;
+		}
+		// callable принимает и имя функции ('trim'), и [объект, метод] / [$this, 'x']
+		if (in_array('callable', $allowed, true) && in_array($actual, ['string', 'array'], true)) {
+			return true;
+		}
+		if ($actual === 'null' || $strict) {
+			return false;
+		}
+		$raw = trim($literal);
+		if (preg_match('/^([\'"]).*\1$/s', $raw) === 1 && strlen($raw) >= 2) {
+			$raw = substr($raw, 1, -1); // строковый литерал: сравниваем содержимое
+		}
+		$numeric = is_numeric($raw);
+		if (in_array('int', $allowed, true) && ($actual === 'bool' || $actual === 'float' || ($actual === 'string' && $numeric))) {
+			return true;
+		}
+		if (in_array('float', $allowed, true) && ($actual === 'bool' || $actual === 'int' || ($actual === 'string' && $numeric))) {
+			return true;
+		}
+		if (in_array('string', $allowed, true) && in_array($actual, ['int', 'float', 'bool'], true)) {
+			return true;
+		}
+		if (in_array('bool', $allowed, true) && in_array($actual, ['int', 'float', 'string'], true)) {
+			return true;
+		}
+		return false;
+	}
+
+	/** Класс из выражения `new Foo(...)` (с учётом use/namespace документа). */
+	private function classOfNew(string $arg, PhpDocumentContext $context): ?string
+	{
+		if (preg_match('/^new\s+\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)\s*\(/', trim($arg), $match) !== 1) {
+			return null;
+		}
+		foreach ($context->classCandidates($match[1]) as $candidate) {
+			if ($this->repository->classByName($candidate) !== null) {
+				return $candidate;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Подходит ли класс аргумента объявленному типу (сам класс, предок,
+	 * интерфейс, `self`/`static`/`parent` относительно текущего класса).
+	 */
+	private function classAllows(
+		array $allowed,
+		string $actualClass,
+		PhpDocumentContext $context,
+		?string $selfClass,
+		string $namespace = '',
+		array $uses = [],
+	): bool {
+		foreach ($allowed as $type) {
+			$lower = strtolower($type);
+			if (in_array($lower, ['mixed', 'object', 'iterable', 'callable'], true)) {
+				return true;
+			}
+			if (in_array($lower, ['int', 'float', 'string', 'bool', 'array', 'void', 'never', 'null', 'false', 'true'], true)) {
+				continue;
+			}
+			if ($type === 'self' || $type === 'static' || $type === '$this' || $lower === 'self' || $lower === 'static' || $lower === '$this') {
+				if ($selfClass === null || $this->repository->classIsA($actualClass, $selfClass)) {
+					return true;
+				}
+				continue;
+			}
+			if ($lower === 'parent') {
+				$row = $selfClass === null ? null : $this->repository->classByName($selfClass);
+				$parent = $row === null ? null : $this->repository->parentClassName($row);
+				if ($parent === null || $this->repository->classIsA($actualClass, $parent)) {
+					return true;
+				}
+				continue;
+			}
+			$candidates = $this->expectedCandidates($type, $namespace, $uses);
+			$resolved = false;
+			foreach ($candidates as $candidate) {
+				if ($this->repository->classByName($candidate) === null) {
+					continue;
+				}
+				$resolved = true;
+				if ($this->repository->classIsA($actualClass, $candidate)) {
+					return true;
+				}
+			}
+			if (!$resolved) {
+				return true; // тип объявлен в неиндексированном коде — не проверяем
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Кандидаты FQCN для имени типа в контексте **объявляющего** файла:
+	 * `use`-алиасы, namespace объявления, затем имя как есть.
+	 *
+	 * @param array<string, string> $uses
+	 * @return array<int, string>
+	 */
+	private function expectedCandidates(string $type, string $namespace, array $uses): array
+	{
+		$clean = ltrim($type, '\\');
+		$candidates = [];
+		$resolved = PhpUseMap::resolve($clean, $uses);
+		if ($resolved !== $clean) {
+			$candidates[] = $resolved;
+		}
+		if (str_contains($clean, '\\')) {
+			$candidates[] = $clean;
+			if ($namespace !== '') {
+				$candidates[] = $namespace . '\\' . $clean;
+			}
+		} else {
+			if ($namespace !== '') {
+				$candidates[] = $namespace . '\\' . $clean;
+			}
+			$candidates[] = $clean;
+		}
+		return array_values(array_unique($candidates));
+	}
+
+	/**
+	 * Namespace и use-карта файла, где объявлен вызываемый символ.
+	 *
+	 * @param array<string, mixed> $callable
+	 * @return array{0: string, 1: array<string, string>}
+	 */
+	private function declaringContext(array $callable): array
+	{
+		$namespace = (string) ($callable['namespace'] ?? '');
+		$file = (string) ($callable['file'] ?? '');
+		$class = (string) ($callable['class_fqcn'] ?? '');
+		if ($class !== '') {
+			$row = $this->repository->classByName($class);
+			if ($row !== null) {
+				$namespace = (string) ($row['namespace'] ?? $namespace);
+				$file = (string) ($row['file'] ?? $file);
+			}
+		}
+		return [$namespace, $this->usesOf($file)];
+	}
+
+	/** @return array<string, string> */
+	private function usesOf(string $file): array
+	{
+		if ($file === '') {
+			return [];
+		}
+		if (!isset($this->declaringUses[$file])) {
+			$text = @file_get_contents($file);
+			$this->declaringUses[$file] = is_string($text) ? PhpUseMap::parse($text) : [];
+		}
+		return $this->declaringUses[$file];
 	}
 
 	/**
@@ -422,7 +618,7 @@ final class PhpSemanticDiagnostics
 	 *
 	 * @return array<int, array<string, mixed>>
 	 */
-	private function checkReturnTypes(TextDocument $document, string $masked): array
+	private function checkReturnTypes(TextDocument $document, string $masked, PhpDocumentContext $context): array
 	{
 		$diagnostics = [];
 		$re = '/\bfunction\s+&?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/';
@@ -456,19 +652,22 @@ final class PhpSemanticDiagnostics
 				continue;
 			}
 			$body = $this->withoutNestedFunctions(substr($masked, $bodyOpen + 1, $bodyClose - $bodyOpen - 1));
-			$declared = strtolower(str_replace(' ', '', $typeText));
-			$parts = array_map(
-				static fn (string $part): string => ltrim(trim($part), '?'),
-				explode('|', $declared),
-			);
-			$nullable = str_starts_with($declared, '?') || in_array('null', $parts, true);
-			$isVoid = in_array('void', $parts, true);
-			$isNever = in_array('never', $parts, true);
+			// maskCode вырезает строковые литералы, поэтому само выражение return
+			// берём из исходного текста: смещения в маске и в тексте совпадают.
+			$rawBody = substr($document->text, $bodyOpen + 1, $bodyClose - $bodyOpen - 1);
+			$declared = str_replace(' ', '', $typeText);
+			$parts = $this->typeList($declared);
+			$lowerParts = array_map('strtolower', $parts);
+			$nullable = str_starts_with($declared, '?') || in_array('null', $lowerParts, true);
+			$isVoid = in_array('void', $lowerParts, true);
+			$isNever = in_array('never', $lowerParts, true);
 			$hasReturn = false;
 			if (preg_match_all('/\breturn\b\s*([^;]*);/', $body, $returns, PREG_OFFSET_CAPTURE) > 0) {
 				$hasReturn = true;
 				foreach ($returns[0] as $returnIndex => $returnMatch) {
-					$value = trim($returns[1][$returnIndex][0]);
+					$rawReturn = substr($rawBody, $returnMatch[1], strlen($returnMatch[0]));
+					$valueStart = strpos($rawReturn, 'return');
+					$value = trim(rtrim(substr($rawReturn, $valueStart === false ? 0 : $valueStart + 6), " \t;"));
 					$offset = $bodyOpen + 1 + $returnMatch[1];
 					if ($isNever) {
 						$diagnostics[] = $this->warning(
@@ -506,17 +705,23 @@ final class PhpSemanticDiagnostics
 						continue;
 					}
 					$actual = $this->literalType($value);
-					if ($actual === null) {
+					$newClass = $actual === null ? $this->classOfNew($value, $context) : null;
+					if ($actual === null && $newClass === null && trim($value) !== '$this') {
 						continue;
 					}
-					if ($this->returnTypeAllows($parts, $nullable, $value, $actual)) {
+					$actualName = $newClass ?? $actual;
+					if ($this->returnAllows($parts, $nullable, $value, $actual, $newClass, $context, $context->classAt($offset)['fqcn'] ?? null, $context->namespaceName(), $context->uses())) {
 						continue;
+					}
+					$message = "Функция {$name}() объявляет возврат {$typeText}, а возвращает {$actualName}.";
+					if ($actual !== null && $this->strictTypes && $this->scalarAllows($parts, $actual, $value, false)) {
+						$message .= ' Документ объявлен со strict_types=1 — приведение скалярных типов запрещено.';
 					}
 					$diagnostics[] = $this->warning(
 						$document,
 						$offset,
 						$offset + strlen($returnMatch[0]),
-						"Функция {$name}() объявляет возврат {$typeText}, а возвращает {$actual}.",
+						$message,
 						'bitrix.php.return-type',
 						['kind' => 'return-type', 'name' => $name],
 					);
@@ -543,31 +748,46 @@ final class PhpSemanticDiagnostics
 	/**
 	 * @param array<int, string> $parts
 	 */
-	private function returnTypeAllows(array $parts, bool $nullable, string $value, string $actual): bool
-	{
-		$raw = strtolower(trim($value));
-		if ($raw === 'null' && $nullable) {
+	private function returnAllows(
+		array $parts,
+		bool $nullable,
+		string $value,
+		?string $actual,
+		?string $newClass,
+		PhpDocumentContext $context,
+		?string $selfClass,
+		string $namespace = '',
+		array $uses = [],
+	): bool {
+		$lowerParts = array_map('strtolower', $parts);
+		if (in_array('mixed', $lowerParts, true)) {
 			return true;
 		}
-		if (in_array('mixed', $parts, true)) {
-			return true;
+		if ($actual === 'null') {
+			return $nullable;
 		}
-		if ($actual === 'bool') {
-			if (in_array('bool', $parts, true)) {
-				return true;
+		if ($actual !== null) {
+			$raw = strtolower(trim($value));
+			if ($actual === 'bool') {
+				if (in_array('bool', $lowerParts, true)) {
+					return true;
+				}
+				if ($raw === 'false' && in_array('false', $lowerParts, true)) {
+					return true;
+				}
+				if ($raw === 'true' && in_array('true', $lowerParts, true)) {
+					return true;
+				}
 			}
-			if ($raw === 'false' && in_array('false', $parts, true)) {
-				return true;
-			}
-			if ($raw === 'true' && in_array('true', $parts, true)) {
-				return true;
-			}
-			return false;
+			return $this->scalarAllows($parts, $actual, $value, $this->strictTypes);
 		}
-		if ($actual === 'int' && in_array('float', $parts, true)) {
-			return true;
+		if (trim($value) === '$this') {
+			return in_array('static', $lowerParts, true) || in_array('self', $lowerParts, true);
 		}
-		return in_array($actual, $parts, true);
+		if ($newClass !== null) {
+			return $this->classAllows($parts, $newClass, $context, $selfClass, $namespace, $uses);
+		}
+		return true; // тип возврата не определили — не ругаемся
 	}
 
 	/** Маскирует вложенные `function (...) { ... }`, чтобы не читать их return. */

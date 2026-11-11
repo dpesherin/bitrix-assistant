@@ -351,6 +351,19 @@ insertGlobal(
 	JSON.stringify(['Vendor\\Demo\\HasMeta']),
 );
 
+insertGlobal(
+	'INSERT INTO php_functions (name, namespace, fqcn, signature, return_type, params_json, doc, deprecated, file, line) VALUES (?,?,?,?,?,?,?,?,?,?)',
+	'expect_worker',
+	'',
+	'expect_worker',
+	'expect_worker(\\Vendor\\Demo\\ParentWorker $worker): void',
+	'void',
+	JSON.stringify([{ name: 'worker', type: '\\Vendor\\Demo\\ParentWorker', variadic: false, byRef: false }]),
+	'Принимает рабочего (и его наследников).',
+	0,
+	path.join(site, 'local/php_interface/functions.php'),
+	12,
+);
 const functionsPath = path.join(site, 'local/php_interface/functions.php');
 insertGlobal(
 	'INSERT INTO php_functions (name, namespace, fqcn, signature, return_type, params_json, doc, deprecated, file, line) VALUES (?,?,?,?,?,?,?,?,?,?)',
@@ -905,6 +918,7 @@ check(
 );
 const semanticUri = pathToFileURL(path.join(site, 'local/php_interface/semantic.php')).toString();
 const semanticText = `<?php
+declare(strict_types=1);
 test_helper();
 test_helper(123);
 missing_function();
@@ -914,6 +928,10 @@ function wrong_return(): array { return 'x'; }
 function union_return(): array|false { return 5; }
 function ok_return(): array|false { return []; }
 function fine_void(): void { return; }
+function number(): int { return '5'; }
+expect_worker(new \\Vendor\\Demo\\ChildWorker());
+expect_worker(new \\Vendor\\Demo\\Item());
+test_helper(null);
 `;
 send({
 	jsonrpc: '2.0',
@@ -935,6 +953,30 @@ const returnMessages = semanticDiagnostics.params.diagnostics
 check(returnMessages.length >= 3, `PHP: return-type сработал ${returnMessages.length} раз`);
 check(!returnMessages.some((message) => message.includes('ok_return')), 'PHP: корректный array|false не ругается');
 check(!returnMessages.some((message) => message.includes('fine_void')), 'PHP: void с return; не ругается');
+
+const argumentMessages = semanticDiagnostics.params.diagnostics
+	.filter((item) => item.code === 'bitrix.php.argument-type')
+	.map((item) => String(item.message));
+check(
+	argumentMessages.some((message) => message.includes('strict_types=1')),
+	'PHP: strict_types отмечен в сообщении о типе аргумента',
+);
+check(
+	argumentMessages.some((message) => message.includes('передан null')),
+	'PHP: null в non-nullable параметр — ошибка',
+);
+check(
+	!argumentMessages.some((message) => message.includes('ChildWorker')),
+	'PHP: наследник подходит под тип родителя',
+);
+check(
+	argumentMessages.some((message) => message.includes('передан Vendor\\Demo\\Item')),
+	'PHP: посторонний класс не подходит под тип параметра',
+);
+check(
+	returnMessages.some((message) => message.includes('strict_types=1')),
+	'PHP: strict_types отмечен в сообщении о типе возврата',
+);
 
 const hoverPosition = (text, index) => {
 	const before = text.slice(0, index);
