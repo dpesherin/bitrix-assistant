@@ -175,8 +175,12 @@ test('PHP: встроен только 8.4', () => {
 		['bundled', 'versioned', 'versioned', 'versioned'],
 	);
 	assert.deepEqual(
-		candidateCommands({ selected: '8.3', bundled }).map((item) => item.source),
+		candidateCommands({ selected: '8.3', bundled, platform: 'darwin' }).map((item) => item.source),
 		['versioned', 'versioned', 'versioned'],
+	);
+	assert.deepEqual(
+		candidateCommands({ selected: '8.3', bundled, platform: 'linux' }).map((item) => item.source),
+		['versioned'],
 	);
 });
 
