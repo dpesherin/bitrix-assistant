@@ -69,11 +69,16 @@ final class PhpTypeInference
 	 */
 	private function elementCandidates(PhpDocumentContext $context, string $variable, int $offset): array
 	{
-		$source = $this->foreachSource($context->masked(), $variable, $offset);
+		$source = null;
+		$bounds = $this->foreachSource($context->masked(), $variable, $offset);
+		if ($bounds !== null) {
+			// Источник берём из исходного текста: маска прячет строковые ключи.
+			$source = trim(substr($context->text(), $bounds[0], max(0, $bounds[1] - $bounds[0])));
+		}
 		if ($source === null) {
 			$rhs = $this->assignmentRightHandSide($context->text(), $variable, $offset);
-			if ($rhs !== null && preg_match('/^(.+?)\s*\[/', $rhs, $match) === 1) {
-				$source = $match[1];
+			if ($rhs !== null && preg_match('/^(.*)\[[^\[\]]*\]\s*$/', $rhs, $match) === 1) {
+				$source = trim($match[1]);
 			}
 		}
 		if ($source === null) {
@@ -92,8 +97,12 @@ final class PhpTypeInference
 		return $candidates;
 	}
 
-	/** Источник `foreach`: `foreach ($source as $key => $variable)`. */
-	private function foreachSource(string $masked, string $variable, int $offset): ?string
+	/**
+	 * Границы источника `foreach ($source as $key => $variable)` в документе.
+	 *
+	 * @return array{0: int, 1: int}|null
+	 */
+	private function foreachSource(string $masked, string $variable, int $offset): ?array
 	{
 		if (preg_match_all('/\bforeach\s*\(/', $masked, $matches, PREG_OFFSET_CAPTURE) === false) {
 			return null;
@@ -119,7 +128,9 @@ final class PhpTypeInference
 			if ($targets === [] || $targets[count($targets) - 1] !== '$' . $variable) {
 				continue;
 			}
-			$source = trim($parts[0]);
+			$rawPart = substr($masked, $open + 1, strlen($parts[0]));
+			$leading = strlen($rawPart) - strlen(ltrim($rawPart));
+			$source = [$open + 1 + $leading, $open + 1 + strlen(rtrim($rawPart))];
 		}
 		return $source;
 	}
@@ -131,6 +142,23 @@ final class PhpTypeInference
 		$type = null;
 		if (preg_match('/^\$([A-Za-z_][A-Za-z0-9_]*)$/', $source, $match) === 1) {
 			$type = $this->docTypeOfVariable($context, $match[1], $offset);
+		} elseif (preg_match('/^\$([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*[\'"]?([A-Za-z_][A-Za-z0-9_]*)[\'"]?\s*\]$/', $source, $match) === 1) {
+			// `@var array{ITEMS: Item[]}`: тип по ключу shape-аннотации.
+			$declared = $this->docTypeOfVariable($context, $match[1], $offset);
+			$member = $declared === null ? null : self::shapeMemberType($declared, $match[2]);
+			return $member === null ? null : self::elementTypeFromString($member);
+		} elseif (preg_match('/^\$this\s*->\s*([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*[\'"]?([A-Za-z_][A-Za-z0-9_]*)[\'"]?\s*\]$/', $source, $match) === 1) {
+			// `$this->result['ITEMS']` для `@var array{ITEMS: Item[]}`.
+			$class = $context->classAt($offset);
+			if ($class !== null) {
+				$property = $this->repository->findPropertyInHierarchy($class['fqcn'], $match[1]);
+				$declared = $property === null
+					? $this->documentPropertyType($context, $match[1])
+					: (self::annotationType((string) ($property['doc'] ?? ''), 'var')
+						?? trim((string) ($property['type'] ?? '')));
+				$member = $declared === null ? null : self::shapeMemberType($declared, $match[2]);
+				return $member === null ? null : self::elementTypeFromString($member);
+			}
 		} elseif (preg_match('/^\$this\s*->\s*([A-Za-z_][A-Za-z0-9_]*)$/', $source, $match) === 1) {
 			$class = $context->classAt($offset);
 			if ($class !== null) {
@@ -139,6 +167,8 @@ final class PhpTypeInference
 					// В колонке только нативный тип (`array`), поэтому `@var Foo[]` точнее.
 					$type = self::annotationType((string) ($property['doc'] ?? ''), 'var')
 						?? trim((string) ($property['type'] ?? ''));
+				} else {
+					$type = $this->documentPropertyType($context, $match[1]);
 				}
 			}
 		} elseif (preg_match('/^\$this\s*->\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)$/', $source, $match) === 1) {
@@ -158,6 +188,30 @@ final class PhpTypeInference
 			return null;
 		}
 		return self::elementTypeFromString($type);
+	}
+
+	/**
+	 * Тип свойства из `@var` прямо в документе — фолбэк, когда файл ещё не в индексе
+	 * (несохранённый класс, только что добавленное свойство).
+	 */
+	private function documentPropertyType(PhpDocumentContext $context, string $name): ?string
+	{
+		$text = $context->text();
+		$pattern = '/\$' . preg_quote($name, '/') . '\s*(?:=[^;]*)?;/';
+		if (preg_match_all($pattern, $text, $matches, PREG_OFFSET_CAPTURE) === false) {
+			return null;
+		}
+		foreach ($matches[0] as $match) {
+			$before = substr($text, max(0, $match[1] - 400), min(400, $match[1]));
+			if (preg_match_all('/@var\s+([^\n*]+)/', $before, $vars) === false || $vars[1] === []) {
+				continue;
+			}
+			$type = self::annotationType('@var ' . end($vars[1]), 'var');
+			if ($type !== null) {
+				return $type;
+			}
+		}
+		return null;
 	}
 
 	/** `@var Foo[] $items` / `@param Foo[] $items` в документе до курсора. */
@@ -189,12 +243,45 @@ final class PhpTypeInference
 		return $type;
 	}
 
+	/**
+	 * Тип из аннотации: учитывает вложенность (`array{ITEMS: Foo[]}`), описание
+	 * после типа и имя переменной в `@var Type $name`.
+	 */
 	private static function annotationType(string $doc, string $tag): ?string
 	{
-		if (preg_match('/@' . $tag . '\s+(\S+)/', $doc, $match) !== 1) {
+		if (preg_match('/@' . $tag . '\s+(.+)$/m', $doc, $match) !== 1) {
 			return null;
 		}
-		return trim($match[1]);
+		$rest = trim((string) preg_replace('/\*\/\s*$/', '', trim($match[1])));
+		$rest = (string) preg_replace('/\s+\$[A-Za-z_][A-Za-z0-9_]*\s*$/', '', $rest);
+		$depth = 0;
+		$type = '';
+		$length = strlen($rest);
+		for ($i = 0; $i < $length; $i++) {
+			$ch = $rest[$i];
+			if ($ch === '{' || $ch === '<' || $ch === '[' || $ch === '(') {
+				$depth++;
+			} elseif ($ch === '}' || $ch === '>' || $ch === ']' || $ch === ')') {
+				$depth = max(0, $depth - 1);
+			}
+			if (ctype_space($ch) && $depth === 0) {
+				break;
+			}
+			$type .= $ch;
+		}
+		return $type === '' ? null : $type;
+	}
+
+	/** Тип поля из shape-аннотации `array{KEY: Type, ...}`. */
+	private static function shapeMemberType(string $type, string $key): ?string
+	{
+		if (preg_match('/array\s*\{/', $type, $match, PREG_OFFSET_CAPTURE) !== 1) {
+			return null;
+		}
+		if (preg_match('/[\'"]?' . preg_quote($key, '/') . '[\'"]?\s*:\s*([^,}]+)/', $type, $found) === 1) {
+			return trim($found[1]);
+		}
+		return null;
 	}
 
 	/** `Foo[]`, `array<Foo>`, `list<Foo>` → `Foo`; union перебирается слева направо. */

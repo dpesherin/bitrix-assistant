@@ -1394,6 +1394,42 @@ check(
 	'PHP: тип элемента массива в foreach по @var Foo[]',
 );
 
+const shapeText = [
+	'<?php',
+	'namespace Vendor\\Demo;',
+	'',
+	'class ShapeDemo',
+	'{',
+	'    /** @var array{ITEMS: \\Vendor\\Demo\\ParentWorker[], COUNT: int} */',
+	'    private array $result = [];',
+	'',
+	'    public function collect(): void',
+	'    {',
+	"        foreach ($this->result['ITEMS'] as $shapeItem) {",
+	'            $shapeItem->work();',
+	'        }',
+	'    }',
+	'}',
+	'',
+].join('\n');
+const shapeUri = pathToFileURL(path.join(site, 'local/php_interface/shape.php')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: shapeUri, languageId: 'php', version: 1, text: shapeText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === shapeUri);
+const shapeTypeRequest = request('textDocument/typeDefinition', {
+	textDocument: { uri: shapeUri },
+	position: { line: 11, character: 14 },
+});
+send(shapeTypeRequest);
+const shapeType = await waitFor((message) => message.id === shapeTypeRequest.id);
+check(
+	Array.isArray(shapeType.result) && shapeType.result[0]?.uri?.endsWith('/parent_worker.php'),
+	'PHP: тип элемента из array{KEY: Foo[]}',
+);
+
 const indexTypeRequest = request('textDocument/typeDefinition', {
 	textDocument: { uri: genericsUri },
 	position: { line: 11, character: 10 },
