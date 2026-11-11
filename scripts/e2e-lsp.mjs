@@ -996,6 +996,7 @@ const methodText = [
 	'        $item->getData();',
 	'        ChainContainer::getInstance()->getFactory(1)->make();',
 	'        ChainContainer::getInstance()->getF',
+	'        new ItemTable();',
 	'    }',
 	'}',
 	'',
@@ -1080,10 +1081,24 @@ const inferredHoverRequest = request('textDocument/hover', {
 });
 send(inferredHoverRequest);
 const inferredHover = await waitFor((message) => message.id === inferredHoverRequest.id);
+// hover приходит с цветными <span>, поэтому сверяем текст без разметки.
+const plainHover = (value) => String(value ?? '').replace(/<[^>]+>/g, '');
 check(
-	inferredHover.result?.contents?.value?.includes('Item::getData'),
+	plainHover(inferredHover.result?.contents?.value).includes('Item::getData'),
 	'PHP: тип переменной выведен из возвращаемого типа метода',
 );
+const newCall = methodText.indexOf('new ItemTable(');
+const newSignatureRequest = request('textDocument/signatureHelp', {
+	textDocument: { uri: methodUri },
+	position: positionAt(methodText, newCall + 'new ItemTable('.length),
+});
+send(newSignatureRequest);
+const newSignature = await waitFor((message) => message.id === newSignatureRequest.id);
+check(
+	newSignature.result?.signatures?.[0]?.label?.includes('__construct'),
+	'PHP: signatureHelp в new ItemTable( показывает конструктор',
+);
+
 const chainCall = methodText.indexOf('getFactory');
 const chainHoverRequest = request('textDocument/hover', {
 	textDocument: { uri: methodUri },

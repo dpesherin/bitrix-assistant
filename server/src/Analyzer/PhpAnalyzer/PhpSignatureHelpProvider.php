@@ -33,6 +33,17 @@ final class PhpSignatureHelpProvider
 		while ($calleeOffset > 0 && preg_match('/\s/', $masked[$calleeOffset]) === 1) {
 			$calleeOffset--;
 		}
+		// `new Foo(...)`: конструктор ищется у класса, а не у `->`/`::`.
+		$context ??= PhpDocumentContext::create($document);
+		$newClass = $this->newExpressionClass($masked, $calleeOffset, $context);
+		if ($newClass !== null) {
+			$reference = $this->constructorReference($newClass);
+			if ($reference === null) {
+				return null;
+			}
+			return $this->signatureForReference($reference, $document, $masked, $open, $offset);
+		}
+
 		$reference = $this->resolver->resolve($document, $calleeOffset, $context);
 		if ($reference === null) {
 			$context = PhpDocumentContext::create($document);
@@ -55,6 +66,20 @@ final class PhpSignatureHelpProvider
 			$reference = ['method' => $method, 'class' => $class['fqcn']];
 		}
 
+		return $this->signatureForReference($reference, $document, $masked, $open, $offset);
+	}
+
+	/**
+	 * @param array{method: array<string, mixed>, class: string} $reference
+	 * @return array<string, mixed>|null
+	 */
+	private function signatureForReference(
+		array $reference,
+		TextDocument $document,
+		string $masked,
+		int $open,
+		int $offset,
+	): ?array {
 		$method = $reference['method'];
 		$params = json_decode((string) ($method['params_json'] ?? '[]'), true);
 		if (!is_array($params)) {
@@ -189,5 +214,81 @@ final class PhpSignatureHelpProvider
 			}
 		}
 		return $commas;
+	}
+
+	/**
+	 * Класс из выражения `new <Name>` непосредственно перед открывающей скобкой.
+	 */
+	private function newExpressionClass(string $masked, int $calleeOffset, PhpDocumentContext $context): ?string
+	{
+		$token = PhpUseMap::tokenAt($masked, $calleeOffset);
+		if ($token === null) {
+			return null;
+		}
+		$before = rtrim(substr($masked, 0, $token['start']));
+		if (preg_match('/(?:^|[^A-Za-z0-9_$>])new$/', $before) !== 1) {
+			return null;
+		}
+		$candidates = $context->classCandidates($token['name']);
+		foreach ($candidates as $candidate) {
+			if ($this->repository->classByName($candidate) !== null || PhpNativeCatalog::find($candidate) !== null) {
+				return $candidate;
+			}
+		}
+		return $candidates[0] ?? null;
+	}
+
+	/**
+	 * Ссылка на конструктор класса: из индекса, а для встроенных классов PHP
+	 * (и классов, наследующих их) — из каталога: их исходников в проекте нет.
+	 *
+	 * @return array{method: array<string, mixed>, class: string}|null
+	 */
+	private function constructorReference(string $fqcn): ?array
+	{
+		$method = $this->repository->findMethodInHierarchy($fqcn, '__construct');
+		if ($method !== null) {
+			return ['method' => $method, 'class' => $fqcn];
+		}
+		$native = PhpNativeCatalog::constructorOf($fqcn);
+		if ($native !== null) {
+			return ['method' => $native, 'class' => PhpNativeCatalog::nameOf($fqcn) ?? $fqcn];
+		}
+		// Наследник встроенного класса: конструктор берётся у предка (`Exception`).
+		$current = $fqcn;
+		$seen = [];
+		for ($guard = 0; $guard < 50; $guard++) {
+			if (isset($seen[$current])) {
+				break;
+			}
+			$seen[$current] = true;
+			$class = $this->repository->classByName($current);
+			if ($class === null) {
+				break;
+			}
+			$parent = $this->repository->parentClassName($class);
+			if ($parent === null) {
+				break;
+			}
+			$native = PhpNativeCatalog::constructorOf($parent);
+			if ($native !== null) {
+				return ['method' => $native, 'class' => PhpNativeCatalog::nameOf($parent) ?? $parent];
+			}
+			$current = $parent;
+		}
+		if ($this->repository->classByName($fqcn) !== null || PhpNativeCatalog::find($fqcn) !== null) {
+			return [
+				'method' => [
+					'name' => '__construct',
+					'signature' => '__construct()',
+					'params_json' => '[]',
+					'doc' => '',
+					'file' => '',
+					'line' => 0,
+				],
+				'class' => $fqcn,
+			];
+		}
+		return null;
 	}
 }

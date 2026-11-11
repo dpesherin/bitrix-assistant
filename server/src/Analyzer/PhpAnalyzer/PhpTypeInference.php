@@ -87,7 +87,9 @@ final class PhpTypeInference
 		if ($depth > self::MAX_DEPTH) {
 			return [];
 		}
-		$current = trim($expression);
+		// `(new StatusChanged([...]))->fillNillable()`: скобки вокруг выражения
+		// не меняют тип, но мешают разбору — снимаем внешние.
+		$current = self::stripOuterParens(trim($expression));
 		$candidates = [];
 		if (preg_match('/^\$([A-Za-z_][A-Za-z0-9_]*)\s*->\s*([A-Za-z_][A-Za-z0-9_]*)$/', $current, $propertyMatch) === 1) {
 			$receivers = $propertyMatch[1] === 'this'
@@ -155,6 +157,32 @@ final class PhpTypeInference
 			}
 		}
 		return $candidates;
+	}
+
+	private static function stripOuterParens(string $expression): string
+	{
+		$current = $expression;
+		while (strlen($current) > 2 && $current[0] === '(' && str_ends_with($current, ')')) {
+			$depth = 0;
+			$closesAtStart = false;
+			$length = strlen($current);
+			for ($i = 0; $i < $length; $i++) {
+				if ($current[$i] === '(') {
+					$depth++;
+				} elseif ($current[$i] === ')') {
+					$depth--;
+					if ($depth === 0) {
+						$closesAtStart = $i === $length - 1;
+						break;
+					}
+				}
+			}
+			if (!$closesAtStart) {
+				return $current;
+			}
+			$current = trim(substr($current, 1, -1));
+		}
+		return $current;
 	}
 
 	private function afterCall(string $expression, int $openOrPrefixLength): ?string

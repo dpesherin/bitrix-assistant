@@ -82,6 +82,10 @@ final class PhpHoverProvider
 		}
 		$class = $this->findClass($document->text, $token['name']);
 		if ($class === null) {
+			$native = PhpNativeCatalog::find($token['name']);
+			if ($native !== null) {
+				return $this->nativeClassHover($document, $native, $token);
+			}
 			$function = $this->repository->findFunction($token['name']);
 			if ($function !== null) {
 				return $this->functionHover($document, $function, $token);
@@ -564,5 +568,28 @@ final class PhpHoverProvider
 			}
 		}
 		return null;
+	}
+
+	/**
+	 * Hover для встроенного класса PHP (его нет в индексе: исходников в проекте нет).
+	 *
+	 * @param array{kind: string, doc: string, ctor: array{signature: string, params: array<int, array<string, mixed>>, doc: string}|null} $native
+	 * @param array{name: string, start: int, end: int} $token
+	 * @return array<string, mixed>
+	 */
+	private function nativeClassHover(TextDocument $document, array $native, array $token): array
+	{
+		$lines = [
+			HoverColor::span('\\' . ltrim($token['name'], '\\'), 'class'),
+			'`' . $native['kind'] . '` · встроенный класс PHP',
+		];
+		if ($native['ctor'] !== null) {
+			$lines[] = HoverColor::signature($native['ctor']['signature']);
+		}
+		$lines[] = $native['doc'];
+		return [
+			'contents' => ['kind' => 'markdown', 'value' => self::renderSections($lines)],
+			'range' => $document->range($token['start'], $token['end']),
+		];
 	}
 }
