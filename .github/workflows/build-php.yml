@@ -80,9 +80,28 @@ jobs:
           fi
           grep -n '^extensions' craft.yml
 
+      # GitHub-hosted раннеры делят IP и упираются в анонимный лимит
+      # GitHub API, поэтому скачивание артефактов иногда падает (exit 75).
+      # Повторяем сборку несколько раз — spc кэширует уже скачанное.
       - name: Build PHP (craft.yml)
         shell: bash
-        run: ./spc craft
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          for attempt in 1 2 3; do
+            echo "==> Попытка сборки $attempt"
+            if ./spc craft; then
+              echo "Сборка удалась"
+              exit 0
+            fi
+            if [[ "$attempt" -lt 3 ]]; then
+              echo "Сборка не удалась, повтор через $((attempt * 20)) c" >&2
+              sleep "$((attempt * 20))"
+            fi
+          done
+          echo "Сборка не удалась после 3 попыток" >&2
+          exit 1
 
       - name: Collect binary
         shell: bash
