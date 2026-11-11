@@ -24,8 +24,17 @@ mkdir -p server/bin
 echo "==> Сборка server/bin/bitrix-lsp.phar"
 "$PHP_BIN" -d phar.readonly=0 scripts/build-phar.php
 
-echo "==> Стабы встроенного PHP (server/data/php-stubs.json)"
-"$PHP_BIN" scripts/build-php-stubs.php
+# Стабы встроенного PHP лежат в репозитории и собраны полным PHP с обычным набором
+# расширений (filter, curl, dom, intl, bcmath…). Пересобирать их минимальным
+# static-бинарником нельзя: тогда пропадают функции расширений, которых в нём нет,
+# и появляются ложные «функция не найдена». Пересборка — только вручную:
+#   BITRIX_REBUILD_STUBS=1 PHP=/opt/homebrew/bin/php bash scripts/build-php.sh
+if [ "${BITRIX_REBUILD_STUBS:-0}" = "1" ]; then
+	echo "==> Стабы встроенного PHP (server/data/php-stubs.json)"
+	"$PHP_BIN" scripts/build-php-stubs.php
+else
+	echo "==> Стабы PHP: уже в репозитории, пропускаю (BITRIX_REBUILD_STUBS=1 — пересобрать)"
+fi
 
 PLATFORM="$("${NODE_BIN:-node}" -p "process.platform + '-' + process.arch")"
 case "$PLATFORM" in

@@ -7,7 +7,7 @@
  * Запуск: npm run compile && node scripts/e2e-lsp.mjs
  */
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -2414,6 +2414,17 @@ const stubDefinition = await waitFor((message) => message.id === stubDefinitionR
 check(
 	(Array.isArray(stubDefinition.result) ? stubDefinition.result.length : 1) === 0,
 	'PHP: у стаба нет файла — definition пустой, а не битый uri',
+);
+
+const stubsJson = JSON.parse(readFileSync(path.join(repoRoot, 'server/data/php-stubs.json'), 'utf8'));
+const stubFunctionNames = new Set((stubsJson.functions ?? []).map((fn) => fn.name));
+check(
+	stubFunctionNames.has('filter_var') && stubFunctionNames.has('curl_init') && stubFunctionNames.has('str_contains'),
+	'PHP: стабы содержат функции стандартных расширений (filter, curl)',
+);
+check(
+	(stubsJson.functions ?? []).length > 1500,
+	'PHP: стабов больше 1500 функций (собраны полным PHP, а не минимальным бинарником)',
 );
 
 const ormUri = pathToFileURL(path.join(site, 'local/php_interface/orm_alias.php')).toString();
