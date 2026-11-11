@@ -2178,6 +2178,57 @@ send(subtypesRequest);
 const subtypes = await waitFor((message) => message.id === subtypesRequest.id);
 check(Array.isArray(subtypes.result), 'PHP: typeHierarchy/subtypes отвечает списком');
 
+const linkDir = path.join(site, 'local/php_interface/inc');
+mkdirSync(linkDir, { recursive: true });
+writeFileSync(path.join(linkDir, 'target.php'), '<?php\n');
+const linkUri = pathToFileURL(path.join(site, 'local/php_interface/links.php')).toString();
+const linkText = [
+	'<?php',
+	'namespace Vendor\\Demo;',
+	'',
+	"require_once __DIR__ . '/inc/target.php';",
+	"require_once __DIR__ . '/inc/missing.php';",
+	'',
+].join('\n');
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: linkUri, languageId: 'php', version: 1, text: linkText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === linkUri);
+const linksRequest = request('textDocument/documentLink', { textDocument: { uri: linkUri } });
+send(linksRequest);
+const links = await waitFor((message) => message.id === linksRequest.id);
+check(
+	Array.isArray(links.result) &&
+		links.result.length === 1 &&
+		links.result[0]?.target?.endsWith('/inc/target.php') &&
+		links.result[0]?.range?.start?.line === 3,
+	'PHP: documentLink для require с существующим файлом',
+);
+
+const formatUri = pathToFileURL(path.join(site, 'local/php_interface/fmt.php')).toString();
+const formatText = '<?php\nnamespace Vendor\\Demo;   \n\nclass Fmt\n{\n}\n\n';
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: formatUri, languageId: 'php', version: 1, text: formatText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === formatUri);
+const formattingRequest = request('textDocument/formatting', {
+	textDocument: { uri: formatUri },
+	options: { tabSize: 4, insertSpaces: true },
+});
+send(formattingRequest);
+const formatting = await waitFor((message) => message.id === formattingRequest.id);
+const formatEdits = Array.isArray(formatting.result) ? formatting.result : [];
+check(formatEdits.length === 2, 'PHP: formatting — хвостовые пробелы и перевод строки');
+check(
+	formatEdits[0]?.newText === '' && formatEdits[0]?.range?.start?.line === 1,
+	'PHP: formatting убирает пробелы в конце строки',
+);
+check(formatEdits[1]?.newText === '\n', 'PHP: formatting оставляет один перевод строки в конце');
+
 send(request('shutdown', {}));
 
 

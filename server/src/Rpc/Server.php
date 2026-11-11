@@ -18,6 +18,8 @@ use BitrixLsp\Analyzer\PhpAnalyzer\PhpCodeLensProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpCompletionProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpDefinitionProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpDiagnostics;
+use BitrixLsp\Analyzer\PhpAnalyzer\PhpDocumentLinkProvider;
+use BitrixLsp\Analyzer\PhpAnalyzer\PhpFormattingProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpFoldingProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpInlayHintProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpMethodResolver;
@@ -62,6 +64,8 @@ final class Server
 	private readonly PhpCodeLensProvider $phpCodeLens;
 	private readonly PhpCallHierarchyProvider $phpCalls;
 	private readonly PhpTypeHierarchyProvider $phpTypes;
+	private readonly PhpDocumentLinkProvider $phpLinks;
+	private readonly PhpFormattingProvider $phpFormatter;
 	private readonly PhpDiagnostics $phpDiagnostics;
 	private readonly PhpSignatureHelpProvider $phpSignatureHelp;
 	private readonly JsSignatureHelpProvider $jsSignatureHelp;
@@ -105,6 +109,8 @@ final class Server
 		$this->phpCodeLens = new PhpCodeLensProvider($this->repository);
 		$this->phpCalls = new PhpCallHierarchyProvider($this->repository, $methodResolver);
 		$this->phpTypes = new PhpTypeHierarchyProvider($this->repository);
+		$this->phpLinks = new PhpDocumentLinkProvider();
+		$this->phpFormatter = new PhpFormattingProvider();
 		$this->phpDiagnostics = new PhpDiagnostics(
 			$this->repository,
 			$this->config,
@@ -207,6 +213,15 @@ final class Server
 			case 'textDocument/codeLens':
 				$this->respond($id, $this->codeLens($params));
 				break;
+			case 'textDocument/documentLink':
+				$this->respond($id, $this->documentLink($params));
+				break;
+			case 'textDocument/formatting':
+				$this->respond($id, $this->formatting($params, null));
+				break;
+			case 'textDocument/rangeFormatting':
+				$this->respond($id, $this->formatting($params, is_array($params['range'] ?? null) ? $params['range'] : []));
+				break;
 			case 'textDocument/prepareCallHierarchy':
 				$this->respond($id, $this->prepareCallHierarchy($params));
 				break;
@@ -276,6 +291,9 @@ final class Server
 				'signatureHelpProvider' => ['triggerCharacters' => ['(', ','], 'retriggerCharacters' => [',']],
 				'codeActionProvider' => ['codeActionKinds' => ['quickfix']],
 				'codeLensProvider' => ['resolveProvider' => false],
+				'documentLinkProvider' => ['resolveProvider' => false],
+				'documentFormattingProvider' => true,
+				'documentRangeFormattingProvider' => true,
 				'workspaceSymbolProvider' => true,
 				'documentSymbolProvider' => true,
 				'workspace' => ['workspaceFolders' => ['supported' => true, 'changeNotifications' => false]],
@@ -517,6 +535,37 @@ final class Server
 			$this->offset($document, $params),
 			(bool) ($context['includeDeclaration'] ?? true),
 		);
+	}
+
+	/**
+	 * Форматирование (консервативное): пробелы в конце строк и перевод строки в конце файла.
+	 *
+	 * @param array<string, mixed> $params
+	 * @param array<string, mixed>|null $range
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function formatting(array $params, ?array $range): array
+	{
+		$document = $this->document($params);
+		if ($document === null || $document->languageId !== 'php') {
+			return [];
+		}
+		return $this->phpFormatter->format($document, $range);
+	}
+
+	/**
+	 * Ссылки из `require`/`include` на файлы.
+	 *
+	 * @param array<string, mixed> $params
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function documentLink(array $params): array
+	{
+		$document = $this->document($params);
+		if ($document === null || $document->languageId !== 'php') {
+			return [];
+		}
+		return $this->phpLinks->provide($document);
 	}
 
 	/**
