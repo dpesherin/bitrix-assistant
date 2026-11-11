@@ -1299,6 +1299,66 @@ check(
 	'PHP: inlayHint приходит в позиции аргумента',
 );
 
+const renameText = [
+	'<?php',
+	'namespace Vendor\\Demo;',
+	'',
+	'function rename_me(int $value): void',
+	'{',
+	'    $value = $value + 1;',
+	'    echo $value;',
+	'}',
+	'',
+].join('\n');
+const renameUri = pathToFileURL(path.join(site, 'local/php_interface/rename.php')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: renameUri, languageId: 'php', version: 1, text: renameText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === renameUri);
+
+const prepareRenameRequest = request('textDocument/prepareRename', {
+	textDocument: { uri: renameUri },
+	position: { line: 5, character: 6 },
+});
+send(prepareRenameRequest);
+const prepareRename = await waitFor((message) => message.id === prepareRenameRequest.id);
+check(
+	prepareRename.result?.placeholder === 'value' && prepareRename.result?.range?.start?.character === 4,
+	'PHP: prepareRename для локальной переменной',
+);
+const prepareRenameEcho = request('textDocument/prepareRename', {
+	textDocument: { uri: renameUri },
+	position: { line: 6, character: 6 },
+});
+send(prepareRenameEcho);
+const prepareRenameEchoResult = await waitFor((message) => message.id === prepareRenameEcho.id);
+check(prepareRenameEchoResult.result === null, 'PHP: prepareRename не для переменной → null');
+
+const renameRequest = request('textDocument/rename', {
+	textDocument: { uri: renameUri },
+	position: { line: 5, character: 6 },
+	newName: 'amount',
+});
+send(renameRequest);
+const renameResult = await waitFor((message) => message.id === renameRequest.id);
+const renameEdits = renameResult.result?.changes?.[renameUri] ?? [];
+check(renameEdits.length === 4, 'PHP: rename переименовывает параметр и все использования');
+check(
+	renameEdits.every((edit) => edit.newText === 'amount') &&
+		renameEdits.some((edit) => edit.range.start.line === 3),
+	'PHP: rename покрывает объявление параметра',
+);
+const renameStringRequest = request('textDocument/rename', {
+	textDocument: { uri: renameUri },
+	position: { line: 5, character: 6 },
+	newName: 'bad-name',
+});
+send(renameStringRequest);
+const renameStringResult = await waitFor((message) => message.id === renameStringRequest.id);
+check(renameStringResult.result === null, 'PHP: rename с недопустимым именем → отказ');
+
 const foldingRequest = request('textDocument/foldingRange', { textDocument: { uri: methodUri } });
 send(foldingRequest);
 const foldingResult = await waitFor((message) => message.id === foldingRequest.id);

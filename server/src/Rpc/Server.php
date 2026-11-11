@@ -20,6 +20,7 @@ use BitrixLsp\Analyzer\PhpAnalyzer\PhpFoldingProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpInlayHintProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpMethodResolver;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpReferenceProvider;
+use BitrixLsp\Analyzer\PhpAnalyzer\PhpRenameProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpSemanticDiagnostics;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpSignatureHelpProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpTypeInference;
@@ -54,6 +55,7 @@ final class Server
 	private readonly PhpFoldingProvider $phpFolding;
 	private readonly PhpTypeNavigation $phpNavigation;
 	private readonly PhpInlayHintProvider $phpInlayHints;
+	private readonly PhpRenameProvider $phpRename;
 	private readonly PhpDiagnostics $phpDiagnostics;
 	private readonly PhpSignatureHelpProvider $phpSignatureHelp;
 	private readonly JsSignatureHelpProvider $jsSignatureHelp;
@@ -93,6 +95,7 @@ final class Server
 		$this->phpFolding = new PhpFoldingProvider();
 		$this->phpNavigation = new PhpTypeNavigation($this->repository, $methodResolver, $typeInference);
 		$this->phpInlayHints = new PhpInlayHintProvider($this->repository, $methodResolver);
+		$this->phpRename = new PhpRenameProvider();
 		$this->phpDiagnostics = new PhpDiagnostics(
 			$this->repository,
 			$this->config,
@@ -186,6 +189,12 @@ final class Server
 			case 'textDocument/inlayHint':
 				$this->respond($id, $this->inlayHint($params));
 				break;
+			case 'textDocument/prepareRename':
+				$this->respond($id, $this->prepareRename($params));
+				break;
+			case 'textDocument/rename':
+				$this->respond($id, $this->rename($params));
+				break;
 			case 'textDocument/signatureHelp':
 				$this->respond($id, $this->signatureHelp($params));
 				break;
@@ -231,6 +240,7 @@ final class Server
 				'documentHighlightProvider' => true,
 				'foldingRangeProvider' => true,
 				'inlayHintProvider' => true,
+				'renameProvider' => ['prepareProvider' => true],
 				'signatureHelpProvider' => ['triggerCharacters' => ['(', ','], 'retriggerCharacters' => [',']],
 				'codeActionProvider' => ['codeActionKinds' => ['quickfix']],
 				'workspaceSymbolProvider' => true,
@@ -474,6 +484,37 @@ final class Server
 			$this->offset($document, $params),
 			(bool) ($context['includeDeclaration'] ?? true),
 		);
+	}
+
+	/**
+	 * Можно ли переименовать символ под курсором (локальные переменные).
+	 *
+	 * @param array<string, mixed> $params
+	 * @return array<string, mixed>|null
+	 */
+	private function prepareRename(array $params): ?array
+	{
+		$document = $this->document($params);
+		if ($document === null || $document->languageId !== 'php') {
+			return null;
+		}
+		return $this->phpRename->prepare($document, $this->offset($document, $params));
+	}
+
+	/**
+	 * Переименование локальной переменной в текущем документе.
+	 *
+	 * @param array<string, mixed> $params
+	 * @return array<string, mixed>|null
+	 */
+	private function rename(array $params): ?array
+	{
+		$document = $this->document($params);
+		$newName = is_string($params['newName'] ?? null) ? trim($params['newName']) : '';
+		if ($document === null || $document->languageId !== 'php' || $newName === '') {
+			return null;
+		}
+		return $this->phpRename->rename($document, $this->offset($document, $params), $newName);
 	}
 
 	/**
