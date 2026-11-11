@@ -115,6 +115,13 @@ final class PhpSemanticDiagnostics
 				$nameOffset = $whole[1] + strpos($whole[0], $name);
 				$reference = $this->resolver->resolve($document, $nameOffset);
 				if ($reference === null) {
+					$unknown = $this->unknownMethod($document, $nameOffset, $name);
+					if ($unknown !== null) {
+						$diagnostics[] = $unknown;
+						if (count($diagnostics) >= self::MAX) {
+							break;
+						}
+					}
 					continue;
 				}
 				$open = $whole[1] + strrpos($whole[0], '(');
@@ -138,9 +145,76 @@ final class PhpSemanticDiagnostics
 			}
 		}
 
+		$unicodeMethodRe = '/(?:->|::)\s*([\p{L}_][\p{L}\p{N}_]*)\s*\(/u';
+		if (preg_match_all($unicodeMethodRe, $masked, $unicodeMatches, PREG_OFFSET_CAPTURE) > 0) {
+			foreach ($unicodeMatches[0] as $index => $whole) {
+				$name = $unicodeMatches[1][$index][0];
+				if (preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $name) === 1) {
+					continue; // обычные имена уже разобраны выше
+				}
+				$nameOffset = $whole[1] + strpos($whole[0], $name);
+				$target = $this->resolver->resolveMemberTarget($document, $nameOffset);
+				if ($target === null) {
+					continue;
+				}
+				$class = ltrim($target['class'], '\\');
+				if ($class === '' || $this->repository->classByName($class) === null) {
+					continue;
+				}
+				$diagnostics[] = $this->warning(
+					$document,
+					$nameOffset,
+					$nameOffset + mb_strlen($name),
+					"Метод {$name}() не найден в классе {$class} (в имени не-ASCII символы — проверьте раскладку).",
+					'bitrix.php.unknown-method',
+					['kind' => 'unknown-method', 'name' => $name, 'class' => $class],
+				);
+				if (count($diagnostics) >= self::MAX) {
+					break;
+				}
+			}
+		}
+
 		$diagnostics = array_merge($diagnostics, $this->checkReturnTypes($document, $masked));
 		$diagnostics = array_merge($diagnostics, $this->undefinedVariables($document, $masked));
 		return array_slice($diagnostics, 0, self::MAX);
+	}
+
+	/**
+	 * Вызов метода, которого нет у известного класса (учитываются `__call`
+	 * и встроенные классы PHP, которых нет в индексе).
+	 *
+	 * @return array<string, mixed>|null
+	 */
+	private function unknownMethod(TextDocument $document, int $nameOffset, string $name): ?array
+	{
+		if ($name === '' || str_starts_with($name, '__')) {
+			return null;
+		}
+		$target = $this->resolver->resolveMemberTarget($document, $nameOffset);
+		if ($target === null) {
+			return null;
+		}
+		$class = ltrim($target['class'], '\\');
+		if ($class === '' || $this->repository->classByName($class) === null) {
+			return null;
+		}
+		$magic = $target['operator'] === '::' ? '__callStatic' : '__call';
+		if (
+			$this->repository->findMethodInHierarchy($class, $magic) !== null
+			|| $this->repository->findMethodInHierarchy($class, '__call') !== null
+			|| $this->repository->findMethodInHierarchy($class, '__callStatic') !== null
+		) {
+			return null;
+		}
+		return $this->warning(
+			$document,
+			$nameOffset,
+			$nameOffset + strlen($name),
+			"Метод {$name}() не найден в классе {$class}.",
+			'bitrix.php.unknown-method',
+			['kind' => 'unknown-method', 'name' => $name, 'class' => $class],
+		);
 	}
 
 	/**

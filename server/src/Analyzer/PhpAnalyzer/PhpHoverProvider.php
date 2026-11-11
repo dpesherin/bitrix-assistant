@@ -60,7 +60,8 @@ final class PhpHoverProvider
 			return $this->methodHover($document, $reference);
 		}
 
-		$target = $this->resolver->resolveMemberTarget($document, $offset);
+		$memberAccess = $this->resolver->resolveMemberTarget($document, $offset);
+		$target = $memberAccess;
 		if ($target !== null) {
 			if ($target['operator'] === '->' || $target['operator'] === '::$') {
 				$property = $this->repository->findPropertyInHierarchy($target['class'], $target['token']['name']);
@@ -78,6 +79,11 @@ final class PhpHoverProvider
 
 		$token = PhpUseMap::tokenAt($document->text, $offset);
 		if ($token === null) {
+			return null;
+		}
+		// `$obj->in_array()` / `Class::foo()`: это обращение к члену, а не вызов
+		// глобальной функции — иначе hover показывал чужую встроенную функцию.
+		if ($memberAccess !== null) {
 			return null;
 		}
 		$class = $this->findClass($document->text, $token['name']);
