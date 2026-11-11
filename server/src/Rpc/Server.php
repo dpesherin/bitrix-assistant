@@ -65,6 +65,8 @@ final class Server
 	private readonly PhpCallHierarchyProvider $phpCalls;
 	private readonly PhpTypeHierarchyProvider $phpTypes;
 	private readonly PhpDocumentLinkProvider $phpLinks;
+	/** @var array<string, true> документы, ожидающие пересчёта диагностики */
+	private array $pendingDiagnostics = [];
 	private readonly PhpFormattingProvider $phpFormatter;
 	private readonly PhpDiagnostics $phpDiagnostics;
 	private readonly PhpSignatureHelpProvider $phpSignatureHelp;
@@ -123,6 +125,12 @@ final class Server
 	{
 		$this->logger->info('Сервер запущен, база: ' . ($this->config->dbPath ?? 'нет'));
 		while (!$this->exit) {
+			// Диагностика не считается на каждый keystroke: ждём паузу в наборе
+			// (350 мс тишины), иначе полный разбор файла блокирует подсказки.
+			if ($this->pendingDiagnostics !== [] && !$this->transport->waitForData(350000)) {
+				$this->flushDiagnostics();
+				continue;
+			}
 			$message = $this->transport->read();
 			if ($message === null) {
 				break;
@@ -377,7 +385,7 @@ final class Server
 			}
 		}
 		$this->documents[$uri] = new TextDocument($uri, $current->languageId, $text, (int) ($document['version'] ?? $current->version));
-		$this->validate($uri);
+		$this->pendingDiagnostics[$uri] = true;
 	}
 
 	/**
@@ -965,6 +973,18 @@ final class Server
 			$diagnostics = $this->collectDiagnostics($document);
 		}
 		return $this->libraryQuickFix->provide($document, $diagnostics);
+	}
+
+	/**
+	 * Пересчитать диагностику для всех документов, ожидающих тишины в наборе.
+	 */
+	private function flushDiagnostics(): void
+	{
+		$pending = $this->pendingDiagnostics;
+		$this->pendingDiagnostics = [];
+		foreach (array_keys($pending) as $uri) {
+			$this->validate($uri);
+		}
 	}
 
 	private function validate(string $uri): void

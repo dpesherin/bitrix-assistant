@@ -46,9 +46,29 @@ final class PhpDocumentContext
 		$this->parseClasses();
 	}
 
+	/**
+	 * @var array<string, self> кэш последних контекстов по содержимому документа
+	 */
+	private static array $cache = [];
+
+	/**
+	 * Контекст строится разбором всего файла (маска + классы/методы), поэтому
+	 * на одном и том же тексте переиспользуем результат: диагностика вызывает
+	 * его для каждого вызова в файле, и без кэша это секунды на keystroke.
+	 */
 	public static function create(TextDocument $document): self
 	{
-		return new self($document->text);
+		$key = md5($document->text);
+		$cached = self::$cache[$key] ?? null;
+		if ($cached instanceof self) {
+			return $cached;
+		}
+		$instance = new self($document->text);
+		self::$cache = [$key => $instance] + self::$cache;
+		if (count(self::$cache) > 4) {
+			array_pop(self::$cache);
+		}
+		return $instance;
 	}
 
 	public function namespaceName(): string

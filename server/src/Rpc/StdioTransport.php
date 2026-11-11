@@ -18,6 +18,20 @@ final class StdioTransport
 	}
 
 	/**
+	 * Есть ли данные на входе в ближайшие $microseconds (без блокировки чтения).
+	 * Нужно для отложенной диагностики: если пользователь перестал печатать,
+	 * сервер успевает пересчитать диагностику до следующего сообщения.
+	 */
+	public function waitForData(int $microseconds): bool
+	{
+		$read = [$this->in];
+		$write = null;
+		$except = null;
+		$ready = @stream_select($read, $write, $except, 0, max(0, $microseconds));
+		return is_int($ready) && $ready > 0;
+	}
+
+	/**
 	 * @return array<string, mixed>|null null — поток закрыт
 	 */
 	public function read(): ?array
