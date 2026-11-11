@@ -146,6 +146,16 @@ export class BitrixLanguageClient implements vscode.Disposable {
 			closed: () => ({ action: CloseAction.DoNotRestart, handled: true }),
 		};
 		const clientOptions: LanguageClientOptions = {
+			// VS Code может запросить подсказки на trigger-символе раньше, чем
+			// отправит textDocument/didChange: сервер тогда видит старый текст
+			// (`$a = s` вместо `$a = str_`) и отдаёт чужие элементы. Небольшая
+			// задержка гарантирует, что изменение уже ушло в LSP.
+			middleware: {
+				provideCompletionItem: async (document, position, context, token, next) => {
+					await new Promise((resolve) => setTimeout(resolve, 25));
+					return next(document, position, context, token);
+				},
+			},
 			documentSelector: [
 				{ scheme: 'file', language: 'php' },
 				{ scheme: 'untitled', language: 'php' },

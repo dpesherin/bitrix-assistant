@@ -189,7 +189,10 @@ final class Server
 		return [
 			'capabilities' => [
 				'textDocumentSync' => ['openClose' => true, 'change' => 1, 'save' => ['includeText' => true]],
-				'completionProvider' => ['triggerCharacters' => ['.', '\\', ':', '>', '$'], 'resolveProvider' => false],
+				// `_` в триггерах: после него редактор запрашивает список заново
+				// (иначе фильтрует уже показанные элементы и `str_con_` прячет
+				// `str_contains` до следующей буквы).
+				'completionProvider' => ['triggerCharacters' => ['.', '\\', ':', '>', '$', '_'], 'resolveProvider' => false],
 				'hoverProvider' => true,
 				'definitionProvider' => true,
 				'signatureHelpProvider' => ['triggerCharacters' => ['(', ','], 'retriggerCharacters' => [',']],
@@ -345,10 +348,18 @@ final class Server
 			return [];
 		}
 		$offset = $this->offset($document, $params);
+		// Клиент мог запросить подсказки раньше, чем прислал didChange: позиция
+		// «за концом» документа означает устаревший текст — лучше ничего не
+		// показывать, чем чужие элементы (например, константы по префиксу `s`).
+		if ($this->positionBeyondEnd($document, $params)) {
+			return [];
+		}
 		$from = max(0, $offset - 200);
 		$before = substr($document->text, $from, $offset - $from);
 		$items = [];
 		$inPhp = $document->languageId === 'php' && $this->isPhpContext($document->text, $offset);
+		// ВРЕМЕННО: трассировка автодополнения, если создан файл-флаг.
+		$trace = is_file('/tmp/ba-log-completion');
 		$jsOnly = in_array($document->languageId, self::JS_LANGUAGES, true)
 			|| ($document->languageId === 'php'
 				&& !$inPhp
@@ -356,9 +367,24 @@ final class Server
 		if ($jsOnly) {
 			// Внутри <script> PHP-подсказки не примешиваем: иначе в параметрах
 			// JS-вызова появлялись функции PHP.
-			return $this->jsCompletion->provide($document, $offset);
+			$items = $this->jsCompletion->provide($document, $offset);
+			if ($trace) {
+				@file_put_contents('/tmp/ba-completion-server.log', date('H:i:s') . " js before=" . str_replace("\n", ' ', substr($before, -30)) . " count=" . count($items) . " | " . implode(', ', array_slice(array_map(static fn (array $i): string => (string) ($i['label'] ?? ''), $items), 0, 8)) . "\n", FILE_APPEND);
+			}
+			return $items;
 		}
-		return $this->phpCompletion->provide($document, $offset);
+		$items = $this->phpCompletion->provide($document, $offset);
+		if ($trace) {
+			$head = array_slice($items, 0, 3);
+			$details = array_map(static function (array $item): string {
+				$range = $item['textEdit']['range']['start']['character'] ?? '-';
+				$end = $item['textEdit']['range']['end']['character'] ?? '-';
+				$line = $item['textEdit']['range']['start']['line'] ?? '-';
+				return ($item['label'] ?? '') . '[' . $line . ':' . $range . '-' . $end . ', filter=' . ($item['filterText'] ?? '') . ']';
+			}, $head);
+			@file_put_contents('/tmp/ba-completion-server.log', date('H:i:s') . " php offset={$offset} before=" . str_replace("\n", ' ', substr($before, -30)) . " count=" . count($items) . " | " . implode(' ', $details) . "\n", FILE_APPEND);
+		}
+		return $items;
 	}
 
 	/**
@@ -655,6 +681,28 @@ final class Server
 	/**
 	 * @param array<string, mixed> $params
 	 */
+	/** Позиция запроса лежит за концом документа (клиент ещё не прислал didChange). */
+	private function positionBeyondEnd(TextDocument $document, array $params): bool
+	{
+		$position = $params['position'] ?? null;
+		if (!is_array($position)) {
+			return false;
+		}
+		$line = (int) ($position['line'] ?? 0);
+		$char = (int) ($position['character'] ?? 0);
+		$text = $document->text;
+		$lastNewline = strrpos($text, "\n");
+		$endLine = $lastNewline === false ? 0 : substr_count($text, "\n");
+		if ($line > $endLine) {
+			return true;
+		}
+		if ($line < $endLine) {
+			return false;
+		}
+		$lastLine = $lastNewline === false ? $text : substr($text, $lastNewline + 1);
+		return $char > mb_strlen($lastLine);
+	}
+
 	private function offset(TextDocument $document, array $params): int
 	{
 		$position = $params['position'] ?? null;

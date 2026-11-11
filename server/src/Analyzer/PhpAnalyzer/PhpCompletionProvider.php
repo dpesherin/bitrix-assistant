@@ -113,7 +113,28 @@ final class PhpCompletionProvider
 			$prefix = $matches[1];
 			$prior = rtrim(substr($before, 0, strlen($before) - strlen($prefix)));
 			if (preg_match('/(?:->|::|\\$|\b(?:new|function|class|interface|trait|enum|use|namespace|extends|implements|const|public|protected|private|static))$/i', $prior) !== 1) {
-				return $this->globalItems($document, $offset, $prefix);
+				$items = $this->globalItems($document, $offset, $prefix);
+				// `str_con_`: точных совпадений нет. Чтобы виджет не показывал
+				// залипший старый список, отдаём ближайший валидный префикс,
+				// растянув filterText и диапазон на весь введённый текст.
+				if ($items === [] && str_contains($prefix, '_')) {
+					$trimmed = rtrim($prefix, '_');
+					if ($trimmed !== '' && $trimmed !== $prefix) {
+						$fallback = $this->globalItems($document, $offset, $trimmed);
+						$range = $document->range($offset - strlen($prefix), $offset);
+						foreach ($fallback as &$fallbackItem) {
+							$label = (string) ($fallbackItem['label'] ?? '');
+							$fallbackItem['filterText'] = $prefix . substr($label, strlen($trimmed));
+							$fallbackItem['textEdit'] = [
+								'range' => $range,
+								'newText' => $label . ((int) ($fallbackItem['kind'] ?? 0) === 3 ? '($0)' : ''),
+							];
+						}
+						unset($fallbackItem);
+						$items = $fallback;
+					}
+				}
+				return $items;
 			}
 		}
 
