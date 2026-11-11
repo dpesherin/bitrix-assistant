@@ -5,6 +5,8 @@ import { generateOrmAnnotation } from './features/ormAnnotations';
 import { PhpClassCompletionProvider } from './features/phpClassCompletion';
 import { PhpAutoImportProvider } from './features/phpAutoImport';
 import { PhpSyntaxChecker } from './features/phpSyntax';
+import { BUNDLED_PHP_VERSION, SELECTABLE_PHP_VERSIONS } from './php/interpreter';
+import { ProjectPhpStore } from './php/projectPhp';
 import { flashFailed, flashIdentical, flashUploaded, spinUpload } from './features/uploadFeedback';
 import { applyHotkeys } from './features/hotkeys';
 import { BitrixIndexer, isIndexableSource, resolveLayout } from './indexer/indexer';
@@ -37,6 +39,7 @@ interface ActiveExtension {
 	preview: RemotePreview;
 	statusBar: BitrixStatusBar;
 	phpSyntax: PhpSyntaxChecker;
+	phpProjects: ProjectPhpStore;
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<ActiveExtension> {
@@ -51,13 +54,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<Active
 	const connections = new SshConnectionManager(store);
 	const sync = new SyncService(connections);
 	const indexer = new BitrixIndexer(context);
-	const lsp = new BitrixLanguageClient(context, indexer);
+	const phpProjects = new ProjectPhpStore(context);
+	const lsp = new BitrixLanguageClient(context, indexer, phpProjects);
 	const tree = new RemoteTreeProvider(connections);
 	const indexView = new IndexViewProvider(indexer);
 	const preview = new RemotePreview(context, connections);
 	const statusBar = new BitrixStatusBar(connections);
-	const phpSyntax = new PhpSyntaxChecker(context);
-	const phpStatus = new PhpVersionStatusBar(phpSyntax);
+	const phpSyntax = new PhpSyntaxChecker(context, phpProjects);
+	const phpStatus = new PhpVersionStatusBar(phpSyntax, phpProjects);
 	const sshView = vscode.window.createTreeView('bitrixSshExplorer', {
 		treeDataProvider: tree,
 		showCollapseAll: true,
@@ -77,12 +81,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<Active
 		preview,
 		statusBar,
 		phpSyntax,
+		phpProjects,
 	};
 
 	context.subscriptions.push(
 		connections,
 		indexer,
 		lsp,
+		phpProjects,
 		statusBar,
 		phpStatus,
 		sshView,
@@ -100,6 +106,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<Active
 		phpSyntax,
 	);
 	await vscode.commands.executeCommand('setContext', 'bitrix.sshConnected', false);
+
+	// Встроен только PHP 8.4: если для проекта выбрана другая версия и её нет
+	// ни в PATH, ни в сохранённом пути, предлагаем скачать или указать путь.
+	setTimeout(() => void phpSyntax.verifySelectedRuntime(), 3000);
+
+	// Версия PHP проекта хранится в workspaceState: после смены перезапускаем LSP,
+	// чтобы анализатор взял новую целевую версию.
+	context.subscriptions.push(
+		phpProjects.onDidChange(() => {
+			void ext.lsp
+				.restart()
+				.catch((err) => log().warn(`LSP restart (PHP проекта): ${errorMessage(err)}`));
+		}),
+	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('bitrix.ssh.connect', () => connect(ext)),
@@ -136,7 +156,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<Active
 		vscode.commands.registerCommand('bitrix.hotkeys.open', () =>
 			vscode.commands.executeCommand('workbench.action.openGlobalKeybindings', 'bitrix'),
 		),
-		vscode.commands.registerCommand('bitrix.php.selectVersion', () => selectPhpVersion()),
+		vscode.commands.registerCommand('bitrix.php.selectVersion', () => selectPhpVersion(ext)),
+		vscode.commands.registerCommand('bitrix.php.setPath', (version?: string) =>
+			ext.phpSyntax.setPath(version),
+		),
+		vscode.commands.registerCommand('bitrix.php.checkRuntime', () =>
+			ext.phpSyntax.verifySelectedRuntime(),
+		),
 		vscode.commands.registerCommand('bitrix.php.downloadRuntime', () => ext.phpSyntax.downloadSelected()),
 		vscode.commands.registerCommand('bitrix.php.manageRuntimes', () => ext.phpSyntax.manageRuntimes()),
 		vscode.commands.registerCommand('bitrix.php.lintWorkspace', () => ext.phpSyntax.lintWorkspace()),
@@ -295,7 +321,8 @@ function registerWatchers(context: vscode.ExtensionContext, ext: ActiveExtension
 			if (
 				event.affectsConfiguration('bitrix.lsp') ||
 				event.affectsConfiguration('bitrix.js.enableLibraryCheck') ||
-				event.affectsConfiguration('bitrix.index.bitrixPath')
+				event.affectsConfiguration('bitrix.index.bitrixPath') ||
+				event.affectsConfiguration('bitrix.php.version')
 			) {
 				await ext.lsp.restart();
 			}
@@ -433,11 +460,11 @@ async function syncIndexAfterSsh(ext: ActiveExtension): Promise<void> {
 	}
 }
 
-async function selectPhpVersion(): Promise<void> {
+async function selectPhpVersion(ext: ActiveExtension): Promise<void> {
 	const uri = vscode.window.activeTextEditor?.document.uri;
-	const config = vscode.workspace.getConfiguration('bitrix.php', uri);
-	const current = config.get<string>('version', 'auto');
-	const versions = ['auto', '7.4', '8.0', '8.1', '8.2', '8.3', '8.4'];
+	const project = ext.phpProjects.projectName(uri);
+	const current = ext.phpProjects.version(uri);
+	const versions = ['auto', ...SELECTABLE_PHP_VERSIONS];
 	const picked = await vscode.window.showQuickPick(
 		versions.map((version) => ({
 			label: version === 'auto' ? 'auto' : `PHP ${version}`,
@@ -445,28 +472,25 @@ async function selectPhpVersion(): Promise<void> {
 				version === current
 					? 'текущая'
 					: version === 'auto'
-						? 'системный php из PATH, иначе встроенный'
-						: `php -l версии ${version}`,
+						? 'что установлено на ПК (php из PATH), иначе встроенный PHP 8.4'
+						: version === BUNDLED_PHP_VERSION
+							? `встроенный PHP ${BUNDLED_PHP_VERSION}`
+							: `php -l версии ${version} — нужен установленный PHP или путь`,
 			version,
 		})),
 		{
-			title: 'Версия PHP для проверки синтаксиса',
-			placeHolder: `Сейчас: ${current}`,
+			title: `Версия PHP для проекта «${project}»`,
+			placeHolder: `Сейчас: ${current}. Версия хранится для проекта в состоянии расширения.`,
 		},
 	);
 	if (!picked) {
 		return;
 	}
-	const folder = uri ? vscode.workspace.getWorkspaceFolder(uri) : undefined;
-	const target = folder
-		? vscode.ConfigurationTarget.WorkspaceFolder
-		: vscode.workspace.workspaceFolders?.length
-			? vscode.ConfigurationTarget.Workspace
-			: vscode.ConfigurationTarget.Global;
-	await config.update('version', picked.version, target);
+	await ext.phpProjects.setVersion(uri, picked.version);
 	void vscode.window.showInformationMessage(
-		`Bitrix Assistant: PHP ${picked.version} для проверки синтаксиса. Если версии нет — укажите bitrix.php.lintBinary.`,
+		`Bitrix Assistant: PHP ${picked.version} для проекта «${project}». Если версии нет — скачайте её или укажите путь командой «указать путь к PHP».`,
 	);
+	await ext.phpSyntax.verifySelectedRuntime();
 }
 
 async function connect(ext: ActiveExtension): Promise<void> {

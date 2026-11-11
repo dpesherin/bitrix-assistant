@@ -13,7 +13,6 @@ export interface BitrixSettings {
 	lspEnabled: boolean;
 	lspPhpBinary: string;
 	phpSemantic: boolean;
-	phpVersion: string;
 }
 
 function config(scope?: vscode.Uri): vscode.WorkspaceConfiguration {
@@ -41,6 +40,5 @@ export function readSettings(scope?: vscode.Uri): BitrixSettings {
 		lspEnabled: Boolean(lsp.enabled ?? true),
 		lspPhpBinary: String(lsp.phpBinary ?? ''),
 		phpSemantic: Boolean(php['semantic'] ?? false),
-		phpVersion: String(php['version'] ?? 'auto'),
 	};
 }

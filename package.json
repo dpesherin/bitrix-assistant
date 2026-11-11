@@ -168,7 +168,17 @@
 			},
 			{
 				"command": "bitrix.php.selectVersion",
-				"title": "Bitrix Assistant: выбрать версию PHP для проверки синтаксиса",
+				"title": "Bitrix Assistant: выбрать версию PHP для проекта",
+				"category": "Bitrix Assistant"
+			},
+			{
+				"command": "bitrix.php.setPath",
+				"title": "Bitrix Assistant: указать путь к PHP для версии",
+				"category": "Bitrix Assistant"
+			},
+			{
+				"command": "bitrix.php.checkRuntime",
+				"title": "Bitrix Assistant: проверить PHP, выбранный для проекта",
 				"category": "Bitrix Assistant"
 			},
 			{
@@ -315,21 +325,30 @@
 						"8.4"
 					],
 					"enumDescriptions": [
-						"Системный php из PATH, иначе встроенный статический PHP.",
+						"Автоопределение на компьютере: `php` из PATH, иначе встроенный PHP 8.4.",
 						"PHP 7.4",
 						"PHP 8.0",
 						"PHP 8.1",
 						"PHP 8.2",
 						"PHP 8.3",
-						"PHP 8.4"
+						"PHP 8.4 — единственная версия, встроенная в расширение"
 					],
-					"description": "Версия PHP для проверки синтаксиса. Для 8.2+ нужен установленный php8.2/php8.3/php8.4 или bitrix.php.lintBinary.",
-					"scope": "resource"
+					"scope": "resource",
+					"markdownDescription": "Версия PHP для проверки синтаксиса и семантики. Это **значение по умолчанию**: выбранная для проекта версия хранится в состоянии расширения (`workspaceState`) и задаётся командой «выбрать версию PHP». Встроен только **PHP 8.4**; для остальных версий поставьте PHP на компьютер (или скачайте статическую сборку) и укажите путь — командой «указать путь к PHP» или через `bitrix.php.paths`."
 				},
 				"bitrix.php.lintBinary": {
 					"type": "string",
 					"default": "",
-					"description": "Путь к PHP-бинарнику для проверки синтаксиса. Пусто — поиск по выбранной версии, затем системный php/встроенный.",
+					"description": "Общий путь к PHP для проверки синтаксиса (устаревшая настройка, действует для любой версии). Для конкретной версии используйте bitrix.php.paths.",
+					"scope": "resource"
+				},
+				"bitrix.php.paths": {
+					"type": "object",
+					"default": {},
+					"additionalProperties": {
+						"type": "string"
+					},
+					"markdownDescription": "Значение по умолчанию: путь к PHP для конкретной версии, например `{ \"8.3\": \"/opt/homebrew/opt/php@8.3/bin/php\" }` или `\"7.4\": \"C:\\\\php74\\\\php.exe\"`. Поддерживаются `~` и `${env:VAR}`. Рабочие пути хранятся в состоянии расширения (`workspaceState`) и задаются командой «указать путь к PHP». Если записи для проекта нет — берётся это значение, затем PATH (`php`, `php8.3`) и встроенный PHP 8.4.",
 					"scope": "resource"
 				},
 				"bitrix.php.semantic": {

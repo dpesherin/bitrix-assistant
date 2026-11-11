@@ -12,6 +12,7 @@ import {
 import { log, errorMessage } from '../log';
 import { BitrixIndexer, resolveLayout } from '../indexer/indexer';
 import { readSettings } from '../settings';
+import type { ProjectPhpStore } from '../php/projectPhp';
 import { resolveLspLaunch } from './platform';
 
 /**
@@ -65,6 +66,7 @@ export class BitrixLanguageClient implements vscode.Disposable {
 	constructor(
 		private readonly context: vscode.ExtensionContext,
 		private readonly indexer: BitrixIndexer,
+		private readonly projects: ProjectPhpStore,
 	) {}
 
 	get isRunning(): boolean {
@@ -90,14 +92,19 @@ export class BitrixLanguageClient implements vscode.Disposable {
 		if (this.client) {
 			return;
 		}
-		const settings = readSettings();
-		if (!settings.lspEnabled) {
-			log().info('LSP выключен настройкой bitrix.lsp.enabled');
-			return;
-		}
 		const layout = resolveLayout();
 		if (!layout) {
 			log().info('LSP не запущен: каталог bitrix не найден в workspace');
+			return;
+		}
+		// Версия PHP и пути берутся из состояния проекта (workspaceState),
+		// настройки — только fallback.
+		const scope = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(layout.siteRoot))?.uri;
+		const settings = readSettings(scope);
+		const phpVersion = this.projects.version(scope);
+		const phpPaths = this.projects.paths(scope);
+		if (!settings.lspEnabled) {
+			log().info('LSP выключен настройкой bitrix.lsp.enabled');
 			return;
 		}
 		this.siteRoot = layout.siteRoot;
@@ -107,6 +114,7 @@ export class BitrixLanguageClient implements vscode.Disposable {
 		const launch = resolveLspLaunch({
 			extensionPath: this.context.extensionPath,
 			configuredBinary: settings.lspPhpBinary || undefined,
+			phpPaths,
 		});
 		if (launch.warning) {
 			log().warn(launch.warning);
@@ -126,7 +134,7 @@ export class BitrixLanguageClient implements vscode.Disposable {
 					BITRIX_BITRIX_PATH: layout.bitrixDir,
 					BITRIX_JS_LIB_CHECK: settings.jsLibraryCheck ? '1' : '0',
 					BITRIX_PHP_SEMANTIC: settings.phpSemantic ? '1' : '0',
-					BITRIX_PHP_VERSION: settings.phpVersion,
+					BITRIX_PHP_VERSION: phpVersion,
 					BITRIX_LSP_LOG: '1',
 				},
 			},
@@ -154,7 +162,7 @@ export class BitrixLanguageClient implements vscode.Disposable {
 				dbPath: this.indexer.dbFile,
 				jsLibraryCheck: settings.jsLibraryCheck,
 				phpSemantic: settings.phpSemantic,
-				phpVersion: settings.phpVersion,
+				phpVersion,
 			},
 			outputChannel: quietOutput(this.output),
 			// Hover-разметка приходит от нашего же LSP; разрешаем HTML только

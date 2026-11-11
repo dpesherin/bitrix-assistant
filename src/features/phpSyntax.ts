@@ -5,9 +5,19 @@ import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { log } from '../log';
 import { downloadRuntime, listCachedRuntimes, removeCachedRuntime, runtimeCachePath } from './phpRuntimeDownloader';
-import { resolveLspLaunch } from '../lsp/platform';
+import { platformKey, staticBinaryName } from '../lsp/platform';
+import {
+	BUNDLED_PHP_VERSION,
+	candidateCommands,
+	describeSource,
+	expandConfigPath,
+	versionMatches,
+	SELECTABLE_PHP_VERSIONS,
+	type PhpSource,
+} from '../php/interpreter';
 import { parseLintOutput } from './phpLint';
 import { isExcluded } from '../util/glob';
+import { ProjectPhpStore } from '../php/projectPhp';
 
 /** Проверка синтаксиса PHP выбранным бинарником (`php -l`). */
 export class PhpSyntaxChecker implements vscode.Disposable {
@@ -16,10 +26,23 @@ export class PhpSyntaxChecker implements vscode.Disposable {
 	private readonly versions = new Map<string, number>();
 	private readonly warned = new Set<string>();
 	private readonly disposables: vscode.Disposable[] = [];
-	private readonly binaryPromises = new Map<string, Promise<{ command: string; version: string } | undefined>>();
+	private readonly binaryPromises = new Map<
+		string,
+		Promise<{ command: string; version: string; source: PhpSource } | undefined>
+	>();
 
-	constructor(private readonly context: vscode.ExtensionContext) {
+	constructor(
+		private readonly context: vscode.ExtensionContext,
+		private readonly projects: ProjectPhpStore,
+	) {
 		this.disposables.push(
+			this.projects.onDidChange(() => {
+				this.binaryPromises.clear();
+				this.versions.clear();
+				for (const document of vscode.workspace.textDocuments) {
+					this.schedule(document);
+				}
+			}),
 			vscode.workspace.onDidOpenTextDocument((document) => this.schedule(document)),
 			vscode.workspace.onDidChangeTextDocument((event) => this.schedule(event.document)),
 			vscode.workspace.onDidSaveTextDocument((document) => this.schedule(document)),
@@ -101,7 +124,7 @@ export class PhpSyntaxChecker implements vscode.Disposable {
 	}
 
 	async effectiveVersion(uri?: vscode.Uri): Promise<string | undefined> {
-		const selected = String(this.config(uri).get<string>('version', 'auto'));
+		const selected = this.projects.version(uri);
 		const binary = await this.resolveBinary(selected, uri);
 		return binary?.version || (selected === 'auto' ? undefined : selected);
 	}
@@ -146,9 +169,9 @@ export class PhpSyntaxChecker implements vscode.Disposable {
 		}
 	}
 
-	async downloadSelected(): Promise<void> {
+	async downloadSelected(versionArg?: string): Promise<void> {
 		const uri = vscode.window.activeTextEditor?.document.uri;
-		const version = String(this.config(uri).get<string>('version', 'auto'));
+		const version = versionArg ?? this.projects.version(uri);
 		if (version === 'auto') {
 			void vscode.window.showWarningMessage('Bitrix Assistant: выберите конкретную версию PHP, чтобы скачать её.');
 			return;
@@ -207,17 +230,16 @@ export class PhpSyntaxChecker implements vscode.Disposable {
 			return;
 		}
 		this.versions.set(document.uri.toString(), version);
-		const config = this.config(document.uri);
-		const selected = String(config.get<string>('version', 'auto'));
+		const selected = this.projects.version(document.uri);
 		const binary = await this.resolveBinary(selected, document.uri);
 		if (!binary) {
 			if (selected !== 'auto') {
-				this.warnMissing(selected);
+				this.warnMissing(selected, undefined, document.uri);
 			}
 			return;
 		}
-		if (selected !== 'auto' && binary.version !== '' && selected !== binary.version) {
-			this.warnMissing(selected);
+		if (!versionMatches(selected, binary.version)) {
+			this.warnMissing(selected, binary.version, document.uri);
 			this.diagnostics.set(document.uri, []);
 			return;
 		}
@@ -275,10 +297,9 @@ export class PhpSyntaxChecker implements vscode.Disposable {
 							const text = await fs.promises.readFile(uri.fsPath, 'utf8');
 							const document = vscode.workspace.textDocuments.find((item) => item.uri.toString() === uri.toString());
 							const version = document?.version;
-							const folderConfig = this.config(uri);
-							const selected = String(folderConfig.get<string>('version', 'auto'));
+							const selected = this.projects.version(uri);
 							const binary = await this.resolveBinary(selected, uri);
-							if (!binary) {
+							if (!binary || !versionMatches(selected, binary.version)) {
 								continue;
 							}
 							const diagnostic = await this.lintText(uri, text, binary);
@@ -351,7 +372,7 @@ ${output.stdout}`);
 	private async resolveBinary(
 		selected: string,
 		uri?: vscode.Uri,
-	): Promise<{ command: string; version: string } | undefined> {
+	): Promise<{ command: string; version: string; source: PhpSource } | undefined> {
 		const key = `${uri?.toString() ?? ''}|${selected}`;
 		const existing = this.binaryPromises.get(key);
 		if (existing) {
@@ -365,58 +386,154 @@ ${output.stdout}`);
 	private async resolveBinaryNow(
 		selected: string,
 		uri?: vscode.Uri,
-	): Promise<{ command: string; version: string } | undefined> {
+	): Promise<{ command: string; version: string; source: PhpSource } | undefined> {
 		const config = this.config(uri);
 		const explicit = String(config.get<string>('lintBinary', '')).trim();
-		if (explicit !== '' && fs.existsSync(explicit)) {
-			const version = await this.versionOf(explicit);
-			return { command: explicit, version: version ?? '' };
-		}
-
-		if (selected !== 'auto') {
-			const cached = runtimeCachePath(
-				this.context,
-				selected,
-				process.platform as 'darwin' | 'linux' | 'win32',
-				process.arch === 'arm64' ? 'arm64' : 'x64',
-			);
-			if (fs.existsSync(cached)) {
-				return { command: cached, version: selected };
-			}
-		}
-
-		const lspConfigured = String(
-			vscode.workspace.getConfiguration('bitrix.lsp').get<string>('phpBinary', ''),
-		).trim();
-		const launch = resolveLspLaunch({
-			extensionPath: this.context.extensionPath,
-			configuredBinary: lspConfigured || undefined,
-			exists: (candidate) => fs.existsSync(candidate),
+		const paths = this.expandedPhpPaths(uri);
+		const key = platformKey();
+		const downloaded =
+			selected === 'auto'
+				? undefined
+				: runtimeCachePath(
+						this.context,
+						selected,
+						process.platform as 'darwin' | 'linux' | 'win32',
+						process.arch === 'arm64' ? 'arm64' : 'x64',
+					);
+		const bundled = key
+			? path.join(this.context.extensionPath, 'server', 'bin', staticBinaryName(key))
+			: undefined;
+		const candidates = candidateCommands({
+			selected,
+			paths,
+			lintBinary: explicit !== '' && fs.existsSync(explicit) ? explicit : undefined,
+			downloaded: downloaded && fs.existsSync(downloaded) ? downloaded : undefined,
+			bundled: bundled && fs.existsSync(bundled) ? bundled : undefined,
 		});
-		const candidates = [
-			'php',
-			lspConfigured,
-			launch.command,
-			`php${selected === 'auto' ? '' : selected}`,
-			selected === 'auto' ? '' : `/opt/homebrew/opt/php@${selected}/bin/php`,
-			selected === 'auto' ? '' : `/usr/local/opt/php@${selected}/bin/php`,
-		].filter((candidate): candidate is string => Boolean(candidate));
-
-		const seen = new Set<string>();
 		for (const candidate of candidates) {
-			if (seen.has(candidate)) {
-				continue;
-			}
-			seen.add(candidate);
-			const version = await this.versionOf(candidate);
+			const version = await this.versionOf(candidate.command);
 			if (!version) {
 				continue;
 			}
-			if (selected === 'auto' || version === selected) {
-				return { command: candidate, version };
+			// Явный путь уважаем как есть: версию пользователь выбрал сам.
+			const explicitSource = candidate.source === 'paths' || candidate.source === 'lintBinary';
+			if (explicitSource || versionMatches(selected, version)) {
+				log().debug(
+					`PHP ${version} для версии ${selected}: ${candidate.command} (${describeSource(candidate.source)})`,
+				);
+				return { command: candidate.command, version, source: candidate.source };
 			}
 		}
 		return undefined;
+	}
+
+	/** Пути к PHP по версиям из состояния проекта. */
+	private phpPaths(uri?: vscode.Uri): Record<string, string> {
+		return this.projects.paths(uri);
+	}
+
+	/** Те же пути с раскрытыми `~` и `${env:VAR}` — для запуска процесса. */
+	private expandedPhpPaths(uri?: vscode.Uri): Record<string, string> {
+		const result: Record<string, string> = {};
+		for (const [version, value] of Object.entries(this.phpPaths(uri))) {
+			result[version] = expandConfigPath(value);
+		}
+		return result;
+	}
+
+	/** Имя проекта, к которому привязана версия PHP. */
+	projectName(uri?: vscode.Uri): string {
+		return this.projects.projectName(uri);
+	}
+
+	/** Проверка при старте: выбранная для проекта версия PHP реально доступна? */
+	async verifySelectedRuntime(): Promise<void> {
+		const uri =
+			vscode.window.activeTextEditor?.document.uri ?? vscode.workspace.workspaceFolders?.[0]?.uri;
+		const config = this.config(uri);
+		if (!config.get<boolean>('lint', true)) {
+			return;
+		}
+		const selected = this.projects.version(uri);
+		if (selected === 'auto') {
+			return;
+		}
+		const binary = await this.resolveBinary(selected, uri);
+		if (binary && versionMatches(selected, binary.version)) {
+			return;
+		}
+		this.warnMissing(selected, binary?.version, uri);
+	}
+
+	/**
+	 * Команда «указать путь к PHP»: путь вводится текстом и сохраняется
+	 * в состоянии проекта (`workspaceState`), без правки файлов проекта.
+	 */
+	async setPath(versionArg?: string): Promise<void> {
+		const uri = vscode.window.activeTextEditor?.document.uri;
+		let version = versionArg ?? this.projects.version(uri);
+		if (version === 'auto') {
+			version =
+				(
+					await vscode.window.showQuickPick(
+						SELECTABLE_PHP_VERSIONS.map((item) => ({ label: `PHP ${item}`, version: item })),
+						{ title: 'Для какой версии PHP указать путь', placeHolder: 'Например, PHP 8.3' },
+					)
+				)?.version ?? '';
+		}
+		if (!version) {
+			return;
+		}
+		const project = this.projectName(uri);
+		const current = this.phpPaths(uri)[version] ?? '';
+		const example = process.platform === 'win32' ? String.raw`C:\php83\php.exe` : '/opt/homebrew/opt/php@8.3/bin/php';
+		const value = await vscode.window.showInputBox({
+			title: `Путь к PHP ${version} — проект «${project}»`,
+			prompt:
+				'Полный путь к исполняемому файлу: можно писать ~ и ${env:HOME}. ' +
+				'Сохраняется в состоянии расширения для проекта. Пустое поле — удалить путь.',
+			value: current,
+			placeHolder: example,
+			validateInput: (input) =>
+				input.trim() !== '' && !/^[~/\\]|^[A-Za-z]:[\\/]/.test(input.trim())
+					? 'Нужен полный путь (например, /usr/bin/php8.3 или C:\\php83\\php.exe)'
+					: undefined,
+		});
+		if (value === undefined) {
+			return;
+		}
+		const trimmed = value.trim();
+		await this.projects.setPath(uri, version, trimmed === '' ? undefined : trimmed);
+
+		if (trimmed === '') {
+			void vscode.window.showInformationMessage(
+				`Bitrix Assistant: путь к PHP ${version} удалён (проект «${project}»).`,
+			);
+		} else {
+			const expanded = expandConfigPath(trimmed);
+			if (!fs.existsSync(expanded)) {
+				void vscode.window.showWarningMessage(
+					`Bitrix Assistant: сохранил путь ${trimmed} для PHP ${version}, но файла нет: ${expanded}. ` +
+						'Проверьте путь после установки PHP.',
+				);
+			}
+			const actual = fs.existsSync(expanded) ? await this.versionOf(expanded) : undefined;
+			if (actual && !versionMatches(version, actual)) {
+				void vscode.window.showWarningMessage(
+					`Bitrix Assistant: по пути ${expanded} работает PHP ${actual}, а указан PHP ${version}. ` +
+						'Выберите файл нужной версии или измените bitrix.php.version.',
+				);
+			} else if (actual) {
+				void vscode.window.showInformationMessage(
+					`Bitrix Assistant: PHP ${version} для проекта «${project}» — ${expanded}.`,
+				);
+			}
+		}
+		this.binaryPromises.clear();
+		this.versions.clear();
+		for (const document of vscode.workspace.textDocuments) {
+			this.schedule(document);
+		}
 	}
 
 	private versionOf(command: string): Promise<string | undefined> {
@@ -432,23 +549,28 @@ ${output.stdout}`);
 		});
 	}
 
-	private warnMissing(version: string): void {
-		const key = `php-version-${version}`;
+	private warnMissing(version: string, actual?: string, uri?: vscode.Uri): void {
+		const project = this.projectName(uri);
+		const key = `php-version-${version}-${project}`;
 		if (this.warned.has(key)) {
 			return;
 		}
 		this.warned.add(key);
+		const detail = actual
+			? `По указанному пути работает PHP ${actual}.`
+			: `Встроен только PHP ${BUNDLED_PHP_VERSION}.`;
 		void vscode.window
 			.showWarningMessage(
-				`Bitrix Assistant: PHP ${version} не найден. Скачать статическую сборку или указать путь?`,
+				`Bitrix Assistant: PHP ${version} для проекта «${project}» не найден. ${detail} ` +
+					'Скачать сборку, указать путь или установить PHP на компьютер.',
 				'Скачать',
 				'Указать путь',
 			)
 			.then((action) => {
 				if (action === 'Скачать') {
-					void this.downloadSelected();
+					void this.downloadSelected(version);
 				} else if (action === 'Указать путь') {
-					void vscode.commands.executeCommand('workbench.action.openSettings', 'bitrix.php.lintBinary');
+					void this.setPath(version);
 				}
 			});
 	}

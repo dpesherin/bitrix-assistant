@@ -274,10 +274,19 @@ Watcher создаётся при активации для каталогов `
 
 Платформы: `win32-x64`, `darwin-x64`, `darwin-arm64`, `linux-x64`, `linux-arm64`.
 Бинарники лежат в `server/bin/php-<os>-<arch>` (Windows — `php-win32-x64.exe`),
-скрипт сервера — `server/bin/bitrix-lsp.phar`. В репозитории лежат готовые
-статические сборки PHP 8.1 (prebuilt static-php-cli, расширения `sqlite3`, `mbstring`,
-`tokenizer`, `ctype`, `phar`); `craft.yml` позволяет пересобрать их на PHP 8.4
-через CI. Системный PHP не требуется ни на одной из пяти платформ.
+скрипт сервера — `server/bin/bitrix-lsp.phar`. В `.vsix` едет **PHP 8.4**
+(static-php-cli по `craft.yml`: `pdo_sqlite`, `sqlite3`, `mbstring`, `tokenizer`,
+`ctype`, `phar`, `pcntl`, `posix`); бинарники собирает CI
+(`.github/workflows/build-php.yml`) и они не хранятся в git. Локальные
+`server/bin/php-*` (PHP 8.1 bulk-сборки, без `pdo_sqlite`) — только для разработки.
+Системный PHP не требуется ни на одной из пяти платформ.
+
+Версия PHP и пути к интерпретаторам хранятся в состоянии расширения
+(`src/php/projectPhp.ts`, ключ `bitrix.php.projects` в `workspaceState`, по записи на папку
+workspace); `bitrix.php.version` / `bitrix.php.paths` читаются только как значение по
+умолчанию. Порядок поиска бинарника описан в `src/php/interpreter.ts`
+(`candidateCommands`): `paths` → `lintBinary` → скачанный рантайм → встроенный 8.4 →
+`php<версия>`/Homebrew. Встроенный рантайм подходит только для 8.4.
 
 `src/lsp/platform.ts` (упрощённо):
 
@@ -562,11 +571,11 @@ workflow лежит в `.github/workflows/build-php.yml` (macOS x64/arm64, Linux
 Windows x64): он скачивает `spc`, выполняет `spc craft`, копирует бинарник под именем
 `server/bin/php-<os>-<arch>` и загружает артефакт. Итог — пять файлов в `server/bin/`.
 
-В репозитории уже лежат пять prebuilt-бинарников static-php-cli:
-`php-darwin-arm64`, `php-darwin-x64`, `php-linux-arm64`, `php-linux-x64` (PHP 8.1.31)
-и `php-win32-x64.exe` (PHP 8.1.34). В них есть `sqlite3`, `mbstring`, `tokenizer`,
-`ctype`, `phar`; `pdo_sqlite` может отсутствовать — сервер автоматически использует
-`sqlite3`. При необходимости CI/workflow пересобирает их на PHP 8.4 по `craft.yml`.
+Пакетные бинарники собирает CI на PHP 8.4 и они лежат в артефактах
+`static-php-*` (в git не попадают из-за `.gitignore`). Локальные
+`server/bin/php-*` — прежние bulk-сборки PHP 8.1.31/8.1.34: в них есть `sqlite3`,
+`mbstring`, `tokenizer`, `ctype`, `phar`, но `pdo_sqlite` может отсутствовать —
+сервер автоматически использует `sqlite3`.
 
 Проверка:
 
