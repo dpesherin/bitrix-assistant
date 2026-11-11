@@ -358,33 +358,16 @@ final class Server
 		$before = substr($document->text, $from, $offset - $from);
 		$items = [];
 		$inPhp = $document->languageId === 'php' && $this->isPhpContext($document->text, $offset);
-		// ВРЕМЕННО: трассировка автодополнения, если создан файл-флаг.
-		$trace = is_file('/tmp/ba-log-completion');
 		$jsOnly = in_array($document->languageId, self::JS_LANGUAGES, true)
 			|| ($document->languageId === 'php'
-				&& !$inPhp
+				&& !$this->isPhpContext($document->text, $offset)
 				&& $this->isJsContext($document->text, $offset));
 		if ($jsOnly) {
 			// Внутри <script> PHP-подсказки не примешиваем: иначе в параметрах
 			// JS-вызова появлялись функции PHP.
-			$items = $this->jsCompletion->provide($document, $offset);
-			if ($trace) {
-				@file_put_contents('/tmp/ba-completion-server.log', date('H:i:s') . " js before=" . str_replace("\n", ' ', substr($before, -30)) . " count=" . count($items) . " | " . implode(', ', array_slice(array_map(static fn (array $i): string => (string) ($i['label'] ?? ''), $items), 0, 8)) . "\n", FILE_APPEND);
-			}
-			return $items;
+			return $this->jsCompletion->provide($document, $offset);
 		}
-		$items = $this->phpCompletion->provide($document, $offset);
-		if ($trace) {
-			$head = array_slice($items, 0, 3);
-			$details = array_map(static function (array $item): string {
-				$range = $item['textEdit']['range']['start']['character'] ?? '-';
-				$end = $item['textEdit']['range']['end']['character'] ?? '-';
-				$line = $item['textEdit']['range']['start']['line'] ?? '-';
-				return ($item['label'] ?? '') . '[' . $line . ':' . $range . '-' . $end . ', filter=' . ($item['filterText'] ?? '') . ']';
-			}, $head);
-			@file_put_contents('/tmp/ba-completion-server.log', date('H:i:s') . " php offset={$offset} before=" . str_replace("\n", ' ', substr($before, -30)) . " count=" . count($items) . " | " . implode(' ', $details) . "\n", FILE_APPEND);
-		}
-		return $items;
+		return $this->phpCompletion->provide($document, $offset);
 	}
 
 	/**

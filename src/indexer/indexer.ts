@@ -47,6 +47,8 @@ export function isIndexableSource(file: string, layout: BitrixLayout): boolean {
 	}
 	if (/\.(?:php)$/i.test(relative)) {
 		return (
+			// Composer-зависимости: без них нет подсказок и переходов по vendor-классам.
+			/^(?:vendor|local\/vendor)\//.test(relative) ||
 			/^(?:bitrix|local)\/(?:components|php_interface)\//.test(relative) ||
 			/^(?:bitrix|local)\/modules\/[^/]+\/(?:lib|classes|install\/components|install\/classes)\//.test(relative) ||
 			/^bitrix\/modules\/[^/]+\/(?:tools|include|prolog|start)\.php$/.test(relative)
@@ -499,7 +501,7 @@ export class BitrixIndexer implements vscode.Disposable {
 		}
 
 		const phpFiles: string[] = [];
-		await this.collectPhpFiles(layout, excludes, token, phpFiles);
+		await this.collectPhpFiles(layout, excludes, token, phpFiles, settings.indexVendor);
 		const jsFiles: string[] = [];
 		const configFiles: string[] = [];
 		await this.collectJsFiles(layout, excludes, settings.jsMaxFileSizeKb, token, jsFiles, configFiles);
@@ -613,6 +615,7 @@ export class BitrixIndexer implements vscode.Disposable {
 		excludes: string[],
 		token: vscode.CancellationToken | undefined,
 		out: string[],
+		includeVendor = false,
 	): Promise<void> {
 		const roots: string[] = [];
 		for (const dir of listDirectories(path.join(layout.bitrixDir, 'modules'))) {
@@ -629,6 +632,9 @@ export class BitrixIndexer implements vscode.Disposable {
 			roots.push(path.join(dir, 'lib'));
 			roots.push(path.join(dir, 'classes'));
 			roots.push(path.join(dir, 'tools.php'), path.join(dir, 'include.php'));
+		}
+		if (includeVendor) {
+			roots.push(path.join(layout.siteRoot, 'vendor'), path.join(layout.localDir, 'vendor'));
 		}
 		roots.push(
 			path.join(layout.bitrixDir, 'components'),

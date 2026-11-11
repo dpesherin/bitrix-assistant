@@ -7,6 +7,7 @@ export interface BitrixSettings {
 	sshAutoConnect: boolean;
 	indexEnabled: boolean;
 	indexPhpStubs: boolean;
+	indexVendor: boolean;
 	bitrixPath: string;
 	indexExclude: string[];
 	jsMaxFileSizeKb: number;
@@ -35,6 +36,7 @@ export function readSettings(scope?: vscode.Uri): BitrixSettings {
 		sshAutoConnect: Boolean(ssh.autoConnect ?? false),
 		indexEnabled: Boolean(index.enabled ?? true),
 		indexPhpStubs: Boolean(index.phpStubs ?? true),
+		indexVendor: Boolean(index.vendor ?? true),
 		bitrixPath: String(index.bitrixPath ?? 'bitrix'),
 		indexExclude: Array.isArray(index.exclude) ? (index.exclude as string[]) : [],
 		jsMaxFileSizeKb: Number(index.jsMaxFileSizeKb ?? 512),

@@ -166,31 +166,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<Active
 		vscode.commands.registerCommand('bitrix.php.downloadRuntime', () => ext.phpSyntax.downloadSelected()),
 		vscode.commands.registerCommand('bitrix.php.manageRuntimes', () => ext.phpSyntax.manageRuntimes()),
 		vscode.commands.registerCommand('bitrix.php.lintWorkspace', () => ext.phpSyntax.lintWorkspace()),
-		// ВРЕМЕННО: дамп подсказок в позиции курсора (для разбора багов автодополнения).
-		vscode.commands.registerCommand('bitrix.debugDumpCompletions', async () => {
-			const editor = vscode.window.activeTextEditor;
-			if (!editor) {
-				return;
-			}
-			const position = editor.selection.active;
-			const list = await vscode.commands.executeCommand<vscode.CompletionList>(
-				'vscode.executeCompletionItemProvider',
-				editor.document.uri,
-				position,
-			);
-			const items = list?.items ?? [];
-			const lines = items.map((item) => {
-				const label = typeof item.label === 'string' ? item.label : item.label.label;
-				const detail = typeof item.detail === 'string' ? item.detail : '';
-				return `${label} | kind=${String(item.kind)} | detail=${detail.slice(0, 50)} | sort=${item.sortText ?? ''}`;
-			});
-			require('node:fs').appendFileSync(
-				'/tmp/ba-client-completion.log',
-				`${new Date().toISOString()} ${editor.document.uri.fsPath}:${position.line + 1}:${position.character + 1} items=${items.length}\n` +
-					lines.map((line) => '  ' + line + '\n').join(''),
-			);
-			void vscode.window.showInformationMessage(`Подсказок в позиции: ${items.length} (записано в /tmp/ba-client-completion.log)`);
-		}),
 		vscode.commands.registerCommand('bitrix.showMenu', () => showMenu(ext)),
 		vscode.commands.registerCommand('bitrix.showLog', () => showLog()),
 		vscode.commands.registerCommand('bitrix.index.rebuild', () => runIndexCommand(ext, true)),
