@@ -685,6 +685,94 @@ final class Repository
 	}
 
 	/**
+	 * Прямые предки класса: extends + implements (без трейтов).
+	 *
+	 * @return array<int, string>
+	 */
+	public function directAncestorsOf(string $fqcn): array
+	{
+		$row = $this->classByName(ltrim($fqcn, '\\'));
+		if ($row === null) {
+			return [];
+		}
+		$result = [];
+		$extends = $row['extends'] ?? null;
+		if (is_string($extends) && $extends !== '') {
+			$clean = ltrim($extends, '\\');
+			$result[] = $clean;
+			$resolved = $this->resolveClassCandidates($clean, (string) ($row['namespace'] ?? ''));
+			foreach ($resolved as $candidate) {
+				if ($this->classByName($candidate) !== null) {
+					$result[count($result) - 1] = $candidate;
+					break;
+				}
+			}
+		}
+		$implements = json_decode((string) ($row['implements'] ?? '[]'), true);
+		if (is_array($implements)) {
+			foreach ($implements as $name) {
+				if (!is_string($name) || $name === '') {
+					continue;
+				}
+				$clean = ltrim($name, '\\');
+				$resolved = $this->resolveClassCandidates($clean, (string) ($row['namespace'] ?? ''));
+				$found = false;
+				foreach ($resolved as $candidate) {
+					if ($this->classByName($candidate) !== null) {
+						$result[] = $candidate;
+						$found = true;
+						break;
+					}
+				}
+				if (!$found) {
+					$result[] = $clean;
+				}
+			}
+		}
+		return array_values(array_unique($result));
+	}
+
+	/**
+	 * Прямые наследники/реализации класса (дети, не всё поддерево).
+	 *
+	 * @return array<int, array<string, mixed>>
+	 */
+	public function directChildrenOf(string $fqcn, int $limit = 200): array
+	{
+		$start = ltrim($fqcn, '\\');
+		if ($start === '') {
+			return [];
+		}
+		$position = strrpos($start, '\\');
+		$short = $position === false ? $start : substr($start, $position + 1);
+		if ($short === '') {
+			return [];
+		}
+		$rows = $this->rows(
+			'SELECT fqcn, name, kind, file, line FROM classes WHERE extends LIKE ? OR implements LIKE ? LIMIT 800',
+			['%' . $short, '%' . $short . '%'],
+		);
+		$target = strtolower($start);
+		$result = [];
+		foreach ($rows as $row) {
+			$child = ltrim((string) ($row['fqcn'] ?? ''), '\\');
+			if ($child === '') {
+				continue;
+			}
+			foreach ($this->directAncestorsOf($child) as $ancestor) {
+				if (strtolower(ltrim($ancestor, '\\')) === $target) {
+					$result[] = $row;
+					break;
+				}
+			}
+			if (count($result) >= $limit) {
+				break;
+			}
+		}
+		return $result;
+	}
+
+	/**
 	 * Наследники и реализации класса (транзитивно, по extends/implements).
 	 *
 	 * @return array<int, array<string, mixed>>

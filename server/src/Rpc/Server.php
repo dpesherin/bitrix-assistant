@@ -26,6 +26,7 @@ use BitrixLsp\Analyzer\PhpAnalyzer\PhpRenameProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpSemanticDiagnostics;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpSignatureHelpProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpTypeInference;
+use BitrixLsp\Analyzer\PhpAnalyzer\PhpTypeHierarchyProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpTypeNavigation;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpHoverProvider;
 use BitrixLsp\Config;
@@ -60,6 +61,7 @@ final class Server
 	private readonly PhpRenameProvider $phpRename;
 	private readonly PhpCodeLensProvider $phpCodeLens;
 	private readonly PhpCallHierarchyProvider $phpCalls;
+	private readonly PhpTypeHierarchyProvider $phpTypes;
 	private readonly PhpDiagnostics $phpDiagnostics;
 	private readonly PhpSignatureHelpProvider $phpSignatureHelp;
 	private readonly JsSignatureHelpProvider $jsSignatureHelp;
@@ -102,6 +104,7 @@ final class Server
 		$this->phpRename = new PhpRenameProvider();
 		$this->phpCodeLens = new PhpCodeLensProvider($this->repository);
 		$this->phpCalls = new PhpCallHierarchyProvider($this->repository, $methodResolver);
+		$this->phpTypes = new PhpTypeHierarchyProvider($this->repository);
 		$this->phpDiagnostics = new PhpDiagnostics(
 			$this->repository,
 			$this->config,
@@ -213,6 +216,15 @@ final class Server
 			case 'callHierarchy/outgoingCalls':
 				$this->respond($id, $this->outgoingCalls($params));
 				break;
+			case 'textDocument/prepareTypeHierarchy':
+				$this->respond($id, $this->prepareTypeHierarchy($params));
+				break;
+			case 'typeHierarchy/supertypes':
+				$this->respond($id, $this->typeSupertypes($params));
+				break;
+			case 'typeHierarchy/subtypes':
+				$this->respond($id, $this->typeSubtypes($params));
+				break;
 			case 'textDocument/signatureHelp':
 				$this->respond($id, $this->signatureHelp($params));
 				break;
@@ -260,6 +272,7 @@ final class Server
 				'inlayHintProvider' => true,
 				'renameProvider' => ['prepareProvider' => true],
 				'callHierarchyProvider' => true,
+				'typeHierarchyProvider' => true,
 				'signatureHelpProvider' => ['triggerCharacters' => ['(', ','], 'retriggerCharacters' => [',']],
 				'codeActionProvider' => ['codeActionKinds' => ['quickfix']],
 				'codeLensProvider' => ['resolveProvider' => false],
@@ -504,6 +517,45 @@ final class Server
 			$this->offset($document, $params),
 			(bool) ($context['includeDeclaration'] ?? true),
 		);
+	}
+
+	/**
+	 * Иерархия типов: класс/интерфейс под курсором.
+	 *
+	 * @param array<string, mixed> $params
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function prepareTypeHierarchy(array $params): array
+	{
+		$document = $this->document($params);
+		if ($document === null || $document->languageId !== 'php') {
+			return [];
+		}
+		return $this->phpTypes->prepare($document, $this->offset($document, $params));
+	}
+
+	/**
+	 * Родители и интерфейсы класса.
+	 *
+	 * @param array<string, mixed> $params
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function typeSupertypes(array $params): array
+	{
+		$item = is_array($params['item'] ?? null) ? $params['item'] : [];
+		return $this->phpTypes->supertypes(is_array($item['data'] ?? null) ? $item['data'] : []);
+	}
+
+	/**
+	 * Наследники и реализации класса.
+	 *
+	 * @param array<string, mixed> $params
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function typeSubtypes(array $params): array
+	{
+		$item = is_array($params['item'] ?? null) ? $params['item'] : [];
+		return $this->phpTypes->subtypes(is_array($item['data'] ?? null) ? $item['data'] : []);
 	}
 
 	/**

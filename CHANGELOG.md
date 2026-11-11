@@ -3,6 +3,18 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версии — [SemVer](https://semver.org/lang/ru/).
 Ведём с текущей версии.
 
+## [0.3.22]
+
+### Добавлено
+
+- **Иерархия типов** (`textDocument/prepareTypeHierarchy`, `typeHierarchy/supertypes`,
+  `typeHierarchy/subtypes`): «Type Hierarchy» для класса/интерфейса.
+  - `supertypes` — прямые родители и реализованные интерфейсы (`Repository::directAncestorsOf`);
+  - `subtypes` — прямые наследники и реализации (`Repository::directChildrenOf`).
+  Клиент сам раскрывает дерево рекурсивно; имена резолвятся с учётом namespace
+  объявления, поэтому короткие записи (`extends ParentWorker`, `implements Countable`)
+  находят настоящие классы.
+
 ## [0.3.21]
 
 ### Добавлено

@@ -2142,6 +2142,42 @@ send(outgoingCallsRequest);
 const outgoingCalls = await waitFor((message) => message.id === outgoingCallsRequest.id);
 check(Array.isArray(outgoingCalls.result), 'PHP: outgoingCalls отвечает списком');
 
+const typesUri = pathToFileURL(path.join(site, 'local/php_interface/child_worker.php')).toString();
+const typesText = [
+	'<?php',
+	'namespace Vendor\\Demo;',
+	'',
+	'class ChildWorker extends ParentWorker',
+	'{',
+	'}',
+	'',
+].join('\n');
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: typesUri, languageId: 'php', version: 1, text: typesText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === typesUri);
+const prepareTypesRequest = request('textDocument/prepareTypeHierarchy', {
+	textDocument: { uri: typesUri },
+	position: { line: 3, character: 8 },
+});
+send(prepareTypesRequest);
+const prepareTypes = await waitFor((message) => message.id === prepareTypesRequest.id);
+const typeItem = prepareTypes.result?.[0];
+check(typeItem?.name === 'ChildWorker' && typeItem?.kind === 5, 'PHP: prepareTypeHierarchy → класс');
+const supertypesRequest = request('typeHierarchy/supertypes', { item: typeItem });
+send(supertypesRequest);
+const supertypes = await waitFor((message) => message.id === supertypesRequest.id);
+check(
+	Array.isArray(supertypes.result) && supertypes.result.some((item) => item.uri?.endsWith('/parent_worker.php')),
+	'PHP: typeHierarchy/supertypes → родитель',
+);
+const subtypesRequest = request('typeHierarchy/subtypes', { item: typeItem });
+send(subtypesRequest);
+const subtypes = await waitFor((message) => message.id === subtypesRequest.id);
+check(Array.isArray(subtypes.result), 'PHP: typeHierarchy/subtypes отвечает списком');
+
 send(request('shutdown', {}));
 
 
