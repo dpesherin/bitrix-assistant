@@ -17,6 +17,7 @@ use BitrixLsp\Analyzer\PhpAnalyzer\PhpCompletionProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpDefinitionProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpDiagnostics;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpMethodResolver;
+use BitrixLsp\Analyzer\PhpAnalyzer\PhpReferenceProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpSemanticDiagnostics;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpSignatureHelpProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpTypeInference;
@@ -46,6 +47,7 @@ final class Server
 	private readonly PhpCompletionProvider $phpCompletion;
 	private readonly PhpHoverProvider $phpHover;
 	private readonly PhpDefinitionProvider $phpDefinition;
+	private readonly PhpReferenceProvider $phpReferences;
 	private readonly PhpDiagnostics $phpDiagnostics;
 	private readonly PhpSignatureHelpProvider $phpSignatureHelp;
 	private readonly JsSignatureHelpProvider $jsSignatureHelp;
@@ -81,6 +83,7 @@ final class Server
 		$this->phpCompletion = new PhpCompletionProvider($this->repository, $typeInference);
 		$this->phpHover = new PhpHoverProvider($this->repository, $methodResolver);
 		$this->phpDefinition = new PhpDefinitionProvider($this->repository, $methodResolver);
+		$this->phpReferences = new PhpReferenceProvider($this->repository, $methodResolver);
 		$this->phpDiagnostics = new PhpDiagnostics(
 			$this->repository,
 			$this->config,
@@ -156,6 +159,12 @@ final class Server
 			case 'textDocument/definition':
 				$this->respond($id, $this->definition($params));
 				break;
+			case 'textDocument/references':
+				$this->respond($id, $this->references($params));
+				break;
+			case 'textDocument/documentHighlight':
+				$this->respond($id, $this->documentHighlight($params));
+				break;
 			case 'textDocument/signatureHelp':
 				$this->respond($id, $this->signatureHelp($params));
 				break;
@@ -195,6 +204,8 @@ final class Server
 				'completionProvider' => ['triggerCharacters' => ['.', '\\', ':', '>', '$', '_'], 'resolveProvider' => false],
 				'hoverProvider' => true,
 				'definitionProvider' => true,
+				'referencesProvider' => true,
+				'documentHighlightProvider' => true,
 				'signatureHelpProvider' => ['triggerCharacters' => ['(', ','], 'retriggerCharacters' => [',']],
 				'codeActionProvider' => ['codeActionKinds' => ['quickfix']],
 				'workspaceSymbolProvider' => true,
@@ -422,6 +433,37 @@ final class Server
 	 * @param array<string, mixed> $params
 	 * @return array<int, array<string, mixed>>
 	 */
+	/**
+	 * @param array<string, mixed> $params
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function references(array $params): array
+	{
+		$document = $this->document($params);
+		if ($document === null || $document->languageId !== 'php') {
+			return [];
+		}
+		$context = is_array($params['context'] ?? null) ? $params['context'] : [];
+		return $this->phpReferences->references(
+			$document,
+			$this->offset($document, $params),
+			(bool) ($context['includeDeclaration'] ?? true),
+		);
+	}
+
+	/**
+	 * @param array<string, mixed> $params
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function documentHighlight(array $params): array
+	{
+		$document = $this->document($params);
+		if ($document === null || $document->languageId !== 'php') {
+			return [];
+		}
+		return $this->phpReferences->highlight($document, $this->offset($document, $params));
+	}
+
 	private function workspaceSymbol(array $params): array
 	{
 		$query = is_string($params['query'] ?? null) ? trim($params['query']) : '';

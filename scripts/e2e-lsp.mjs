@@ -7,7 +7,7 @@
  * Запуск: npm run compile && node scripts/e2e-lsp.mjs
  */
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -644,6 +644,41 @@ insertGlobal(
 	membersPath,
 	6,
 );
+// Файлы для references: объявление на диске и вызов в соседнем файле.
+mkdirSync(path.dirname(methodFilePath), { recursive: true });
+writeFileSync(
+	methodFilePath,
+	[
+		'<?php',
+		'namespace Vendor\\Demo;',
+		'',
+		'class ItemTable',
+		'{',
+		'    public static function find(',
+		'    public static function getMap(): array',
+		'    {',
+		'        return [];',
+		'    }',
+		'}',
+		'',
+	].join('\n'),
+);
+const referenceUsagePath = path.join(site, 'local/php_interface/item_usage.php');
+writeFileSync(
+	referenceUsagePath,
+	['<?php', 'namespace Vendor\\Demo;', '', '$table = new ItemTable();', '$table->getMap();', ''].join('\n'),
+);
+for (const indexed of [methodFilePath, referenceUsagePath]) {
+	const stat = statSync(indexed);
+	db.run(
+		'INSERT OR REPLACE INTO file_hashes (path, hash, size, mtime) VALUES (?,?,?,?)',
+		indexed,
+		'e2e',
+		stat.size,
+		Math.floor(stat.mtimeMs / 1000),
+	);
+}
+
 db.exec('COMMIT;');
 
 
@@ -1058,6 +1093,42 @@ check(
 	methodDefinition.result?.[0]?.uri?.endsWith('/item_table.php') &&
 		methodDefinition.result?.[0]?.range?.start?.line === 6,
 	'PHP: definition метода → файл класса',
+);
+
+const getMapReferences = request('textDocument/references', {
+	textDocument: { uri: methodUri },
+	position: positionAt(methodText, getMapCall + 'self::get'.length),
+	context: { includeDeclaration: true },
+});
+send(getMapReferences);
+const referencesResult = await waitFor((message) => message.id === getMapReferences.id);
+const referenceLocations = Array.isArray(referencesResult.result) ? referencesResult.result : [];
+const declarationLocation = referenceLocations.find((item) => item.uri?.endsWith('/item_table.php'));
+const usageLocation = referenceLocations.find((item) => item.uri?.endsWith('/item_usage.php'));
+check(Boolean(declarationLocation), 'PHP: references находит объявление метода');
+check(
+	declarationLocation?.range?.start?.line === 6 &&
+		declarationLocation?.range?.end?.character > declarationLocation?.range?.start?.character,
+	'PHP: references подсвечивает имя в объявлении, а не всю строку',
+);
+check(
+	usageLocation?.range?.start?.line === 4 && usageLocation?.range?.start?.character === 8,
+	'PHP: references находит вызов в другом файле',
+);
+
+const highlightRequest = request('textDocument/documentHighlight', {
+	textDocument: { uri: methodUri },
+	position: positionAt(methodText, getMapCall + 'self::get'.length),
+});
+send(highlightRequest);
+const highlightResult = await waitFor((message) => message.id === highlightRequest.id);
+const highlightRanges = Array.isArray(highlightResult.result) ? highlightResult.result : [];
+const cursorLine = positionAt(methodText, getMapCall + 'self::get'.length).line;
+check(highlightRanges.length === 2, 'PHP: documentHighlight находит все вхождения в файле');
+check(
+	highlightRanges.some((item) => item.range?.start?.line === cursorLine) &&
+		highlightRanges.every((item) => item.kind === 1),
+	'PHP: documentHighlight попадает в строку курсора',
 );
 
 const findCall = methodText.indexOf('self::find(');

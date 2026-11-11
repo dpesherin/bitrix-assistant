@@ -37,6 +37,20 @@ final class Repository
 		$this->extensions = null;
 	}
 
+	/**
+	 * PHP-файлы, попавшие в индекс (для поиска использований по тексту).
+	 *
+	 * @return array<int, string>
+	 */
+	public function indexedPhpFiles(int $limit = 4000): array
+	{
+		$rows = $this->rows(
+			"SELECT path FROM file_hashes WHERE path LIKE '%.php' ORDER BY path ASC LIMIT ?",
+			[$limit],
+		);
+		return array_map(static fn (array $row): string => (string) ($row['path'] ?? ''), $rows);
+	}
+
 	public function isAvailable(): bool
 	{
 		return $this->database() !== null;
