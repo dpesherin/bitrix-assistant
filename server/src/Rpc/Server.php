@@ -13,6 +13,7 @@ use BitrixLsp\Analyzer\JsAnalyzer\JsSignatureHelpProvider;
 use BitrixLsp\Analyzer\JsAnalyzer\LibraryResolver;
 use BitrixLsp\Analyzer\LibraryCheck\LibraryDiagnostics;
 use BitrixLsp\Analyzer\LibraryCheck\LibraryQuickFix;
+use BitrixLsp\Analyzer\PhpAnalyzer\PhpCallHierarchyProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpCodeLensProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpCompletionProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpDefinitionProvider;
@@ -58,6 +59,7 @@ final class Server
 	private readonly PhpInlayHintProvider $phpInlayHints;
 	private readonly PhpRenameProvider $phpRename;
 	private readonly PhpCodeLensProvider $phpCodeLens;
+	private readonly PhpCallHierarchyProvider $phpCalls;
 	private readonly PhpDiagnostics $phpDiagnostics;
 	private readonly PhpSignatureHelpProvider $phpSignatureHelp;
 	private readonly JsSignatureHelpProvider $jsSignatureHelp;
@@ -99,6 +101,7 @@ final class Server
 		$this->phpInlayHints = new PhpInlayHintProvider($this->repository, $methodResolver);
 		$this->phpRename = new PhpRenameProvider();
 		$this->phpCodeLens = new PhpCodeLensProvider($this->repository);
+		$this->phpCalls = new PhpCallHierarchyProvider($this->repository, $methodResolver);
 		$this->phpDiagnostics = new PhpDiagnostics(
 			$this->repository,
 			$this->config,
@@ -201,6 +204,15 @@ final class Server
 			case 'textDocument/codeLens':
 				$this->respond($id, $this->codeLens($params));
 				break;
+			case 'textDocument/prepareCallHierarchy':
+				$this->respond($id, $this->prepareCallHierarchy($params));
+				break;
+			case 'callHierarchy/incomingCalls':
+				$this->respond($id, $this->incomingCalls($params));
+				break;
+			case 'callHierarchy/outgoingCalls':
+				$this->respond($id, $this->outgoingCalls($params));
+				break;
 			case 'textDocument/signatureHelp':
 				$this->respond($id, $this->signatureHelp($params));
 				break;
@@ -247,6 +259,7 @@ final class Server
 				'foldingRangeProvider' => true,
 				'inlayHintProvider' => true,
 				'renameProvider' => ['prepareProvider' => true],
+				'callHierarchyProvider' => true,
 				'signatureHelpProvider' => ['triggerCharacters' => ['(', ','], 'retriggerCharacters' => [',']],
 				'codeActionProvider' => ['codeActionKinds' => ['quickfix']],
 				'codeLensProvider' => ['resolveProvider' => false],
@@ -491,6 +504,47 @@ final class Server
 			$this->offset($document, $params),
 			(bool) ($context['includeDeclaration'] ?? true),
 		);
+	}
+
+	/**
+	 * Иерархия вызовов: символ под курсором.
+	 *
+	 * @param array<string, mixed> $params
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function prepareCallHierarchy(array $params): array
+	{
+		$document = $this->document($params);
+		if ($document === null || $document->languageId !== 'php') {
+			return [];
+		}
+		return $this->phpCalls->prepare($document, $this->offset($document, $params));
+	}
+
+	/**
+	 * Кто вызывает символ (по тексту проиндексированных файлов).
+	 *
+	 * @param array<string, mixed> $params
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function incomingCalls(array $params): array
+	{
+		$item = is_array($params['item'] ?? null) ? $params['item'] : [];
+		$data = is_array($item['data'] ?? null) ? $item['data'] : [];
+		return $this->phpCalls->incoming($data);
+	}
+
+	/**
+	 * Кого вызывает символ (разбор тела объявления).
+	 *
+	 * @param array<string, mixed> $params
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function outgoingCalls(array $params): array
+	{
+		$item = is_array($params['item'] ?? null) ? $params['item'] : [];
+		$data = is_array($item['data'] ?? null) ? $item['data'] : [];
+		return $this->phpCalls->outgoing($data);
 	}
 
 	/**

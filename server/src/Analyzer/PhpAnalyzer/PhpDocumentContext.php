@@ -116,12 +116,7 @@ final class PhpDocumentContext
 			return false;
 		}
 		foreach ($class['methods'] as $method) {
-			$bodyOpen = strpos($this->masked, '{', $method['end']);
-			if ($bodyOpen === false) {
-				continue;
-			}
-			$bodyClose = $this->matchingBrace($bodyOpen);
-			if ($offset > $bodyOpen && $offset <= $bodyClose) {
+			if ($offset > $method['start'] && $offset <= $method['end']) {
 				return true;
 			}
 		}
@@ -216,6 +211,35 @@ final class PhpDocumentContext
 		// переменные ядра, их типы известны.
 		$global = self::globalClass($variable);
 		return $global !== null ? [$global] : [];
+	}
+
+	/**
+	 * Функция (не метод), в теле которой находится курсор.
+	 *
+	 * @return array{name: string, start: int, end: int}|null
+	 */
+	public function enclosingFunctionAt(int $offset): ?array
+	{
+		if (preg_match_all('/function\s+&?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/', $this->masked, $matches, PREG_SET_ORDER | PREG_OFFSET_CAPTURE) === false) {
+			return null;
+		}
+		$best = null;
+		foreach ($matches as $match) {
+			$openParen = $match[0][1] + strlen($match[0][0]) - 1;
+			$closeParen = $this->matchingParen($openParen);
+			if ($closeParen <= $openParen || $offset <= $closeParen) {
+				continue;
+			}
+			$brace = strpos($this->masked, '{', $closeParen);
+			if ($brace === false) {
+				continue;
+			}
+			$bodyClose = $this->matchingBrace($brace);
+			if ($offset > $brace && $offset < $bodyClose) {
+				$best = ['name' => $match[1][0], 'start' => $match[0][1], 'end' => $bodyClose];
+			}
+		}
+		return $best;
 	}
 
 	/**
@@ -329,10 +353,20 @@ final class PhpDocumentContext
 			$openParen = $bodyOpen + $match[1] + strlen($match[0]) - 1;
 			$closeParen = $this->matchingParen($openParen);
 			$params = $this->parseParams(substr($this->masked, $openParen + 1, max(0, $closeParen - $openParen - 1)));
+			// Метод занимает и тело: иначе поиск «в каком методе курсор»
+			// не работает для кода внутри фигурных скобок.
+			$end = $closeParen;
+			$bodyBrace = strpos($this->masked, '{', $closeParen);
+			if ($bodyBrace !== false) {
+				$bodyClose = $this->matchingBrace($bodyBrace);
+				if ($bodyClose > $bodyBrace) {
+					$end = $bodyClose;
+				}
+			}
 			$methods[] = [
 				'name' => $name,
 				'start' => $bodyOpen + $match[1],
-				'end' => $closeParen,
+				'end' => $end,
 				'params' => $params,
 			];
 		}

@@ -2096,6 +2096,52 @@ check(
 	'JS: тип переменной из @returns фабрики',
 );
 
+const callUri = pathToFileURL(methodFilePath).toString();
+const callText = [
+	'<?php',
+	'namespace Vendor\\Demo;',
+	'',
+	'class ItemTable',
+	'{',
+	'    public static function find(): ?static',
+	'    {',
+	'        return null;',
+	'    }',
+	'',
+	'    public static function getMap(): array',
+	'    {',
+	'        return [];',
+	'    }',
+	'}',
+	'',
+].join('\n');
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: callUri, languageId: 'php', version: 1, text: callText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === callUri);
+const prepareCallsRequest = request('textDocument/prepareCallHierarchy', {
+	textDocument: { uri: callUri },
+	position: { line: 10, character: 28 },
+});
+send(prepareCallsRequest);
+const prepareCalls = await waitFor((message) => message.id === prepareCallsRequest.id);
+const callItem = prepareCalls.result?.[0];
+check(callItem?.name === 'getMap' && callItem?.kind === 6, 'PHP: prepareCallHierarchy → метод');
+const incomingCallsRequest = request('callHierarchy/incomingCalls', { item: callItem });
+send(incomingCallsRequest);
+const incomingCalls = await waitFor((message) => message.id === incomingCallsRequest.id);
+const incoming = Array.isArray(incomingCalls.result) ? incomingCalls.result : [];
+check(
+	incoming.length >= 1 && incoming.every((call) => (call.fromRanges ?? []).length >= 1),
+	'PHP: incomingCalls находит вызов метода',
+);
+const outgoingCallsRequest = request('callHierarchy/outgoingCalls', { item: callItem });
+send(outgoingCallsRequest);
+const outgoingCalls = await waitFor((message) => message.id === outgoingCallsRequest.id);
+check(Array.isArray(outgoingCalls.result), 'PHP: outgoingCalls отвечает списком');
+
 send(request('shutdown', {}));
 
 

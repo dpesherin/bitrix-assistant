@@ -45,10 +45,15 @@ final class Repository
 	 *
 	 * @return array<int, string>
 	 */
-	public function indexedPhpFiles(int $limit = 4000): array
+	public function indexedPhpFiles(int $limit = 4000, bool $projectFirst = false): array
 	{
+		// Ядро Битрикса в индексе идёт первым по алфавиту и легко съедает лимит,
+		// поэтому для поиска по вызовам сначала отдаём файлы проекта (не /bitrix/).
+		$order = $projectFirst
+			? "CASE WHEN path LIKE '%/bitrix/%' THEN 1 ELSE 0 END, path ASC"
+			: 'path ASC';
 		$rows = $this->rows(
-			"SELECT path FROM file_hashes WHERE path LIKE '%.php' ORDER BY path ASC LIMIT ?",
+			"SELECT path FROM file_hashes WHERE path LIKE '%.php' ORDER BY " . $order . ' LIMIT ?',
 			[$limit],
 		);
 		return array_map(static fn (array $row): string => (string) ($row['path'] ?? ''), $rows);
