@@ -184,6 +184,14 @@ final class PhpDocumentContext
 			}
 		}
 
+		$params = $this->functionParamsAt($offset);
+		if (isset($params[$variable])) {
+			$candidates = $this->typeCandidates($params[$variable]);
+			if ($candidates !== []) {
+				return $candidates;
+			}
+		}
+
 		$pattern = '/\$' . preg_quote($variable, '/') . '\s*=\s*new\s+([\\\\A-Za-z_][\\\\A-Za-z0-9_]*)/';
 		if (preg_match_all($pattern, $this->text, $matches, PREG_OFFSET_CAPTURE) > 0) {
 			$found = null;
@@ -202,6 +210,40 @@ final class PhpDocumentContext
 		// переменные ядра, их типы известны.
 		$global = self::globalClass($variable);
 		return $global !== null ? [$global] : [];
+	}
+
+	/**
+	 * Параметры функции по позиции курсора, включая глобальные функции
+	 * (у методов параметры уже разобраны в `methodAt`).
+	 *
+	 * @return array<string, string> имя переменной => тип
+	 */
+	public function functionParamsAt(int $offset): array
+	{
+		if (preg_match_all('/function\s+&?\s*[A-Za-z_][A-Za-z0-9_]*\s*\(/', $this->masked, $matches, PREG_OFFSET_CAPTURE) === false) {
+			return [];
+		}
+		$best = [];
+		foreach ($matches[0] as $match) {
+			$openParen = $match[1] + strlen($match[0]) - 1;
+			$closeParen = $this->matchingParen($openParen);
+			if ($closeParen <= $openParen || $offset <= $closeParen) {
+				continue; // курсор в объявлении или до него
+			}
+			$brace = strpos($this->masked, '{', $closeParen);
+			if ($brace === false) {
+				continue;
+			}
+			$bodyClose = $this->matchingBrace($brace);
+			if ($offset <= $brace || $offset >= $bodyClose) {
+				continue;
+			}
+			$params = $this->parseParams(substr($this->masked, $openParen + 1, $closeParen - $openParen - 1));
+			if (count($params) > count($best)) {
+				$best = $params;
+			}
+		}
+		return $best;
 	}
 
 	/**

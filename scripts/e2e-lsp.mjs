@@ -1173,6 +1173,57 @@ check(
 	'PHP: documentHighlight попадает в строку курсора',
 );
 
+const navText = [
+	'<?php',
+	'namespace Vendor\\Demo;',
+	'',
+	'function useWorker(\\Vendor\\Demo\\ParentWorker $worker): void',
+	'{',
+	'    $worker->work();',
+	'}',
+	'',
+].join('\n');
+const navUri = pathToFileURL(path.join(site, 'local/php_interface/navigation.php')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: navUri, languageId: 'php', version: 1, text: navText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === navUri);
+
+const typeDefinitionRequest = request('textDocument/typeDefinition', {
+	textDocument: { uri: navUri },
+	position: { line: 5, character: 6 },
+});
+send(typeDefinitionRequest);
+const typeDefinition = await waitFor((message) => message.id === typeDefinitionRequest.id);
+check(
+	Array.isArray(typeDefinition.result) && typeDefinition.result[0]?.uri?.endsWith('/parent_worker.php'),
+	'PHP: typeDefinition переменной → её класс',
+);
+
+const classImplementationRequest = request('textDocument/implementation', {
+	textDocument: { uri: navUri },
+	position: { line: 3, character: 26 },
+});
+send(classImplementationRequest);
+const classImplementation = await waitFor((message) => message.id === classImplementationRequest.id);
+check(
+	Array.isArray(classImplementation.result) && classImplementation.result.some((item) => item.uri?.endsWith('/child_worker.php')),
+	'PHP: implementation класса → наследник',
+);
+
+const methodImplementationRequest = request('textDocument/implementation', {
+	textDocument: { uri: navUri },
+	position: { line: 5, character: 15 },
+});
+send(methodImplementationRequest);
+const methodImplementation = await waitFor((message) => message.id === methodImplementationRequest.id);
+check(
+	Array.isArray(methodImplementation.result) && methodImplementation.result.some((item) => item.uri?.endsWith('/child_worker.php')),
+	'PHP: implementation метода → переопределение в наследнике',
+);
+
 const foldingRequest = request('textDocument/foldingRange', { textDocument: { uri: methodUri } });
 send(foldingRequest);
 const foldingResult = await waitFor((message) => message.id === foldingRequest.id);

@@ -677,6 +677,73 @@ final class Repository
 	}
 
 	/**
+	 * Наследники и реализации класса (транзитивно, по extends/implements).
+	 *
+	 * @return array<int, array<string, mixed>>
+	 */
+	public function descendantsOf(string $fqcn, int $limit = 300): array
+	{
+		$start = ltrim($fqcn, '\\');
+		if ($start === '') {
+			return [];
+		}
+		$result = [];
+		$seen = [strtolower($start) => true];
+		$queue = [$start];
+		while ($queue !== [] && count($result) < $limit) {
+			$current = array_shift($queue);
+			$position = strrpos($current, '\\');
+			$short = $position === false ? $current : substr($current, $position + 1);
+			if ($short === '') {
+				continue;
+			}
+			$rows = $this->rows(
+				'SELECT fqcn, name, kind, file, line FROM classes WHERE extends LIKE ? OR implements LIKE ? LIMIT 800',
+				['%' . $short, '%' . $short . '%'],
+			);
+			foreach ($rows as $row) {
+				$child = ltrim((string) ($row['fqcn'] ?? ''), '\\');
+				$key = strtolower($child);
+				if ($child === '' || isset($seen[$key])) {
+					continue;
+				}
+				// LIKE по короткому имени может поймать однофамильцев — проверяем иерархию.
+				if (!$this->classIsA($child, $current)) {
+					continue;
+				}
+				$seen[$key] = true;
+				$result[] = $row;
+				$queue[] = $child;
+				if (count($result) >= $limit) {
+					break;
+				}
+			}
+		}
+		return $result;
+	}
+
+	/**
+	 * Переопределения метода у наследников/реализаций.
+	 *
+	 * @return array<int, array<string, mixed>>
+	 */
+	public function methodImplementations(string $fqcn, string $name, int $limit = 100): array
+	{
+		$result = [];
+		foreach ($this->descendantsOf($fqcn, 400) as $row) {
+			$method = $this->methodByName((string) ($row['fqcn'] ?? ''), $name);
+			if ($method === null) {
+				continue;
+			}
+			$result[] = $method;
+			if (count($result) >= $limit) {
+				break;
+			}
+		}
+		return $result;
+	}
+
+	/**
 	 * Является ли класс наследником/реализацией `$target` (обход extends,
 	 * implements и трейтов по индексу). Сравнение без учёта регистра.
 	 */

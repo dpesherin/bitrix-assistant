@@ -22,6 +22,7 @@ use BitrixLsp\Analyzer\PhpAnalyzer\PhpReferenceProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpSemanticDiagnostics;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpSignatureHelpProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpTypeInference;
+use BitrixLsp\Analyzer\PhpAnalyzer\PhpTypeNavigation;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpHoverProvider;
 use BitrixLsp\Config;
 use BitrixLsp\Index\Repository;
@@ -50,6 +51,7 @@ final class Server
 	private readonly PhpDefinitionProvider $phpDefinition;
 	private readonly PhpReferenceProvider $phpReferences;
 	private readonly PhpFoldingProvider $phpFolding;
+	private readonly PhpTypeNavigation $phpNavigation;
 	private readonly PhpDiagnostics $phpDiagnostics;
 	private readonly PhpSignatureHelpProvider $phpSignatureHelp;
 	private readonly JsSignatureHelpProvider $jsSignatureHelp;
@@ -87,6 +89,7 @@ final class Server
 		$this->phpDefinition = new PhpDefinitionProvider($this->repository, $methodResolver);
 		$this->phpReferences = new PhpReferenceProvider($this->repository, $methodResolver);
 		$this->phpFolding = new PhpFoldingProvider();
+		$this->phpNavigation = new PhpTypeNavigation($this->repository, $methodResolver, $typeInference);
 		$this->phpDiagnostics = new PhpDiagnostics(
 			$this->repository,
 			$this->config,
@@ -162,6 +165,12 @@ final class Server
 			case 'textDocument/definition':
 				$this->respond($id, $this->definition($params));
 				break;
+			case 'textDocument/typeDefinition':
+				$this->respond($id, $this->typeDefinition($params));
+				break;
+			case 'textDocument/implementation':
+				$this->respond($id, $this->implementation($params));
+				break;
 			case 'textDocument/references':
 				$this->respond($id, $this->references($params));
 				break;
@@ -210,6 +219,8 @@ final class Server
 				'completionProvider' => ['triggerCharacters' => ['.', '\\', ':', '>', '$', '_'], 'resolveProvider' => false],
 				'hoverProvider' => true,
 				'definitionProvider' => true,
+				'typeDefinitionProvider' => true,
+				'implementationProvider' => true,
 				'referencesProvider' => true,
 				'documentHighlightProvider' => true,
 				'foldingRangeProvider' => true,
@@ -456,6 +467,36 @@ final class Server
 			$this->offset($document, $params),
 			(bool) ($context['includeDeclaration'] ?? true),
 		);
+	}
+
+	/**
+	 * Тип выражения под курсором (переменная/метод/свойство/класс).
+	 *
+	 * @param array<string, mixed> $params
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function typeDefinition(array $params): array
+	{
+		$document = $this->document($params);
+		if ($document === null || $document->languageId !== 'php') {
+			return [];
+		}
+		return $this->phpNavigation->typeDefinition($document, $this->offset($document, $params));
+	}
+
+	/**
+	 * Реализации интерфейса и переопределения метода в наследниках.
+	 *
+	 * @param array<string, mixed> $params
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function implementation(array $params): array
+	{
+		$document = $this->document($params);
+		if ($document === null || $document->languageId !== 'php') {
+			return [];
+		}
+		return $this->phpNavigation->implementations($document, $this->offset($document, $params));
 	}
 
 	/**
