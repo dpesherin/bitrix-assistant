@@ -1,0 +1,31 @@
+# Сборка статического PHP для LSP-сервера (static-php-cli / StaticPHP).
+#
+# Требуемые расширения:
+#   pdo_sqlite, sqlite3 — чтение SQLite-индекса (PDO + нативный драйвер);
+#   mbstring           — пересчёт позиций LSP (UTF-16) и работа с UTF-8;
+#   tokenizer          — запас под будущий полноценный PHP-парсер;
+#   ctype              — проверки символов (ctype_space и т.п.);
+#   phar               — запуск LSP из server/bin/bitrix-lsp.phar;
+#   pcntl              — аккуратное завершение дочернего процесса;
+#   posix              — базовые POSIX-функции (Linux/macOS).
+#
+# json в PHP 8 встроен и отдельным расширением не собирается —
+# в списке spc его указывать не нужно.
+#
+# Сборка (пример для текущей платформы):
+#   curl -#fSL https://dl.static-php.dev/v3/spc-bin/nightly/spc-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m) -o spc
+#   chmod +x spc && ./spc doctor --auto-fix
+#   ./spc craft                      # v3: читает craft.yml из текущего каталога
+#   cp buildroot/bin/php server/bin/php-linux-x64
+#
+# Результат каждой платформы кладётся в server/bin/php-<os>-<arch>
+# (Windows: php-win32-x64.exe).
+
+php-version: 8.4
+extensions: pdo_sqlite,sqlite3,mbstring,tokenizer,ctype,phar,pcntl,posix
+sapi:
+  - cli
+download-options:
+  parallel: 10
+  retry: 5
+  prefer-binary: true

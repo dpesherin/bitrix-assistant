@@ -1,0 +1,13 @@
+node_modules/
+out/
+*.vsix
+.DS_Store
+.vscode-test/
+# локальные артефакты сборки PHP
+server/bin/php-*
+server/bin/*.phar
+!server/bin/.gitkeep
+# локальный индекс (создаётся в globalStorage, но на всякий случай)
+bitrix-index.db*
+# скриншоты в корне репозитория (не часть расширения)
+/*.png

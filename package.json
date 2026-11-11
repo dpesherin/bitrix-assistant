@@ -1,0 +1,546 @@
+{
+	"name": "bitrix-assistant",
+	"displayName": "Bitrix Assistant",
+	"description": "Индекс ядра 1С-Битрикс, подсказки PHP и JS (LSP), SSH-синхронизация с сервером и терминал на сервере — без внешних сервисов и LLM",
+	"version": "0.3.2",
+	"publisher": "pesherind",
+	"license": "MIT",
+	"engines": {
+		"vscode": "^1.100.0"
+	},
+	"categories": [
+		"Programming Languages",
+		"Other"
+	],
+	"keywords": [
+		"bitrix",
+		"php",
+		"ssh",
+		"lsp",
+		"bitrix24",
+		"1c-bitrix",
+		"phpshtorm-less"
+	],
+	"extensionKind": [
+		"workspace"
+	],
+	"main": "./out/src/extension.js",
+	"activationEvents": [
+		"onStartupFinished"
+	],
+	"contributes": {
+		"commands": [
+			{
+				"command": "bitrix.ssh.connect",
+				"title": "Bitrix Assistant: Подключиться к серверу",
+				"icon": "$(plug)"
+			},
+			{
+				"command": "bitrix.ssh.terminal",
+				"title": "Bitrix Assistant: Терминал на сервере",
+				"icon": "$(terminal)"
+			},
+			{
+				"command": "bitrix.ssh.disconnect",
+				"title": "Bitrix Assistant: Отключиться",
+				"icon": "$(debug-disconnect)"
+			},
+			{
+				"command": "bitrix.ssh.upload",
+				"title": "Bitrix Assistant: Загрузить файл на сервер",
+				"icon": "$(cloud-upload)",
+				"category": "Bitrix Assistant"
+			},
+			{
+				"command": "bitrix.ssh.download",
+				"title": "Bitrix Assistant: Скачать файл с сервера",
+				"icon": "$(cloud-download)"
+			},
+			{
+				"command": "bitrix.ssh.syncAll",
+				"title": "Bitrix Assistant: Синхронизировать всё",
+				"icon": "$(sync)"
+			},
+			{
+				"command": "bitrix.ssh.addProfile",
+				"title": "Bitrix Assistant: Добавить SSH-профиль"
+			},
+			{
+				"command": "bitrix.ssh.removeProfile",
+				"title": "Bitrix Assistant: Удалить SSH-профиль"
+			},
+			{
+				"command": "bitrix.index.rebuild",
+				"title": "Bitrix Assistant: Перестроить индекс",
+				"icon": "$(refresh)"
+			},
+			{
+				"command": "bitrix.index.reindexFile",
+				"title": "Bitrix Assistant: Переиндексировать текущий файл"
+			},
+			{
+				"command": "bitrix.index.stats",
+				"title": "Bitrix Assistant: Показать статистику индекса"
+			},
+			{
+				"command": "bitrix.orm.generateAnnotations",
+				"title": "Bitrix Assistant: Сгенерировать аннотации ORM"
+			},
+			{
+				"command": "bitrix.lsp.restart",
+				"title": "Bitrix Assistant: Перезапустить LSP-сервер"
+			},
+			{
+				"command": "bitrix.ssh.preview",
+				"title": "Bitrix Assistant: Открыть файл с сервера (просмотр)",
+				"icon": "$(eye)"
+			},
+			{
+				"command": "bitrix.ssh.downloadRemote",
+				"title": "Bitrix Assistant: Скачать с сервера",
+				"icon": "$(cloud-download)"
+			},
+			{
+				"command": "bitrix.ssh.uploadLocal",
+				"title": "Bitrix Assistant: Загрузить локальную версию",
+				"icon": "$(cloud-upload)"
+			},
+			{
+				"command": "bitrix.ssh.copyRemotePath",
+				"title": "Bitrix Assistant: Скопировать путь на сервере",
+				"icon": "$(copy)"
+			},
+			{
+				"command": "bitrix.ssh.refresh",
+				"title": "Bitrix Assistant: Обновить дерево сервера",
+				"icon": "$(refresh)"
+			},
+			{
+				"command": "bitrix.showMenu",
+				"title": "Bitrix Assistant: Меню расширения"
+			},
+			{
+				"command": "bitrix.showLog",
+				"title": "Bitrix Assistant: Показать лог",
+				"icon": "$(output)"
+			},
+			{
+				"command": "bitrix.ssh.switchProfile",
+				"title": "Bitrix Assistant: Сменить сервер",
+				"icon": "$(server)",
+				"category": "Bitrix Assistant"
+			},
+			{
+				"command": "bitrix.ssh.setDefaultProfile",
+				"title": "Bitrix Assistant: Сделать профиль по умолчанию",
+				"icon": "$(star-full)"
+			},
+			{
+				"command": "bitrix.ssh.saveAndUpload",
+				"title": "Bitrix Assistant: Сохранить и загрузить на сервер",
+				"icon": "$(cloud-upload)",
+				"category": "Bitrix Assistant"
+			},
+			{
+				"command": "bitrix.ssh.compareRemote",
+				"title": "Bitrix Assistant: Сравнить с сервером",
+				"icon": "$(diff)"
+			},
+			{
+				"command": "bitrix.ssh.openLocal",
+				"title": "Bitrix Assistant: Открыть локальную версию",
+				"icon": "$(go-to-file)"
+			},
+			{
+				"command": "bitrix.index.compact",
+				"title": "Bitrix Assistant: Уплотнить базу индекса",
+				"icon": "$(database)"
+			},
+			{
+				"command": "bitrix.hotkeys.apply",
+				"title": "Bitrix Assistant: применить горячие клавиши из настроек",
+				"category": "Bitrix Assistant"
+			},
+			{
+				"command": "bitrix.hotkeys.open",
+				"title": "Bitrix Assistant: открыть Keyboard Shortcuts",
+				"category": "Bitrix Assistant"
+			},
+			{
+				"command": "bitrix.php.selectVersion",
+				"title": "Bitrix Assistant: выбрать версию PHP для проверки синтаксиса",
+				"category": "Bitrix Assistant"
+			},
+			{
+				"command": "bitrix.php.downloadRuntime",
+				"title": "Bitrix Assistant: скачать PHP для проверки синтаксиса",
+				"category": "Bitrix Assistant"
+			},
+			{
+				"command": "bitrix.php.manageRuntimes",
+				"title": "Bitrix Assistant: управлять скачанными версиями PHP",
+				"category": "Bitrix Assistant"
+			},
+			{
+				"command": "bitrix.php.lintWorkspace",
+				"title": "Bitrix Assistant: проверить синтаксис всего проекта",
+				"category": "Bitrix Assistant"
+			},
+			{
+				"command": "bitrix.index.cleanupLegacy",
+				"title": "Bitrix Assistant: удалить старую глобальную базу индекса",
+				"category": "Bitrix Assistant"
+			},
+			{
+				"command": "bitrix.ssh.manageHostKeys",
+				"title": "Bitrix Assistant: управлять SSH host key",
+				"category": "Bitrix Assistant"
+			}
+		],
+		"configuration": {
+			"title": "Bitrix Assistant",
+			"properties": {
+				"bitrix.ssh.uploadOnSave": {
+					"type": "boolean",
+					"default": false,
+					"description": "Загружать файл на сервер при сохранении (нужен активный SSH-профиль)."
+				},
+				"bitrix.ssh.downloadOnOpen": {
+					"type": "boolean",
+					"default": false,
+					"description": "Скачивать файл при открытии, если на сервере он новее локальной копии."
+				},
+				"bitrix.ssh.exclude": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"default": [
+						"bitrix/cache/**",
+						"bitrix/managed_cache/**",
+						"bitrix/stack_cache/**",
+						"bitrix/backup/**",
+						"upload/**",
+						"**/*.min.js",
+						"**/node_modules/**",
+						"**/*.bak",
+						"**/*.bitrix-assistant-*.tmp"
+					],
+					"description": "Glob-паттерны путей (относительно корня проекта), которые не синхронизируются."
+				},
+				"bitrix.index.enabled": {
+					"type": "boolean",
+					"default": true,
+					"description": "Включить локальный индекс ядра и JS-расширений (SQLite)."
+				},
+				"bitrix.index.bitrixPath": {
+					"type": "string",
+					"default": "bitrix",
+					"description": "Путь к каталогу bitrix относительно корня workspace (абсолютный путь тоже допустим)."
+				},
+				"bitrix.index.exclude": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"default": [
+						"bitrix/cache/**",
+						"bitrix/managed_cache/**",
+						"bitrix/stack_cache/**",
+						"bitrix/backup/**",
+						"upload/**",
+						"**/node_modules/**",
+						"**/*.min.js",
+						"**/*.bak",
+						"**/*.bitrix-assistant-*.tmp"
+					],
+					"description": "Glob-паттерны, исключаемые из индексации."
+				},
+				"bitrix.index.jsMaxFileSizeKb": {
+					"type": "number",
+					"default": 512,
+					"description": "Не индексировать JS-файлы больше указанного размера (КБ)."
+				},
+				"bitrix.js.enableLibraryCheck": {
+					"type": "boolean",
+					"default": false,
+					"description": "Проверять, что используемые через BX.* библиотеки подключены (CJSCore::Init / Extension::load / rel). По умолчанию выключено: в шаблонах подключение часто задаётся вне текущего файла."
+				},
+				"bitrix.lsp.enabled": {
+					"type": "boolean",
+					"default": true,
+					"description": "Запускать LSP-сервер (PHP) для php/javascript."
+				},
+				"bitrix.lsp.phpBinary": {
+					"type": "string",
+					"default": "",
+					"description": "Путь к PHP-бинарнику для LSP. Пусто — встроенный static-php-cli бинарник из server/bin, при его отсутствии — php из PATH."
+				},
+				"bitrix.ssh.autoConnect": {
+					"type": "boolean",
+					"default": false,
+					"description": "Автоматически подключаться при старте к профилю по умолчанию (bitrix.ssh.setDefaultProfile)."
+				},
+				"bitrix.keybindings.switchProfile": {
+					"type": "string",
+					"default": "",
+					"markdownDescription": "Клавиша смены SSH-сервера. Пусто — `Ctrl+Alt+P` (macOS `Cmd+Alt+P`). После изменения выполните [Bitrix Assistant: применить горячие клавиши](command:bitrix.keybindings.apply) или [откройте Keyboard Shortcuts](command:bitrix.keybindings.open)."
+				},
+				"bitrix.keybindings.upload": {
+					"type": "string",
+					"default": "",
+					"markdownDescription": "Клавиша загрузки текущего файла. Пусто — `Ctrl+Alt+U` (macOS `Cmd+Alt+U`). После изменения выполните [Bitrix Assistant: применить горячие клавиши](command:bitrix.keybindings.apply) или [откройте Keyboard Shortcuts](command:bitrix.keybindings.open)."
+				},
+				"bitrix.keybindings.saveAndUpload": {
+					"type": "string",
+					"default": "",
+					"markdownDescription": "Клавиша «сохранить и загрузить». Пусто — `Ctrl+Alt+S` (macOS `Cmd+Alt+S`). После изменения выполните [Bitrix Assistant: применить горячие клавиши](command:bitrix.keybindings.apply) или [откройте Keyboard Shortcuts](command:bitrix.keybindings.open)."
+				},
+				"bitrix.php.lint": {
+					"type": "boolean",
+					"default": true,
+					"description": "Проверять синтаксис PHP через `php -l` и показывать ошибки в Problems.",
+					"scope": "resource"
+				},
+				"bitrix.php.version": {
+					"type": "string",
+					"default": "auto",
+					"enum": [
+						"auto",
+						"7.4",
+						"8.0",
+						"8.1",
+						"8.2",
+						"8.3",
+						"8.4"
+					],
+					"enumDescriptions": [
+						"Системный php из PATH, иначе встроенный статический PHP.",
+						"PHP 7.4",
+						"PHP 8.0",
+						"PHP 8.1",
+						"PHP 8.2",
+						"PHP 8.3",
+						"PHP 8.4"
+					],
+					"description": "Версия PHP для проверки синтаксиса. Для 8.2+ нужен установленный php8.2/php8.3/php8.4 или bitrix.php.lintBinary.",
+					"scope": "resource"
+				},
+				"bitrix.php.lintBinary": {
+					"type": "string",
+					"default": "",
+					"description": "Путь к PHP-бинарнику для проверки синтаксиса. Пусто — поиск по выбранной версии, затем системный php/встроенный.",
+					"scope": "resource"
+				},
+				"bitrix.php.semantic": {
+					"type": "boolean",
+					"default": false,
+					"scope": "resource",
+					"description": "Семантические предупреждения PHP: неизвестные функции/переменные, число и типы аргументов."
+				}
+			}
+		},
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "bitrixAssistant",
+					"title": "Bitrix Assistant",
+					"icon": "media/bitrix.svg"
+				}
+			]
+		},
+		"views": {
+			"bitrixAssistant": [
+				{
+					"id": "bitrixSshExplorer",
+					"name": "Удалённый сервер",
+					"icon": "media/server.svg"
+				},
+				{
+					"id": "bitrixIndex",
+					"name": "Индекс",
+					"icon": "media/index.svg"
+				}
+			]
+		},
+		"menus": {
+			"view/title": [
+				{
+					"command": "bitrix.ssh.refresh",
+					"when": "view == bitrixSshExplorer",
+					"group": "navigation@0"
+				},
+				{
+					"command": "bitrix.ssh.switchProfile",
+					"when": "view == bitrixSshExplorer",
+					"group": "navigation@1"
+				},
+				{
+					"command": "bitrix.ssh.connect",
+					"when": "view == bitrixSshExplorer",
+					"group": "navigation@2"
+				},
+				{
+					"command": "bitrix.ssh.disconnect",
+					"when": "view == bitrixSshExplorer",
+					"group": "navigation@4"
+				},
+				{
+					"command": "bitrix.ssh.terminal",
+					"when": "view == bitrixSshExplorer",
+					"group": "navigation@3"
+				},
+				{
+					"command": "bitrix.ssh.syncAll",
+					"when": "view == bitrixSshExplorer",
+					"group": "navigation@5"
+				},
+				{
+					"command": "bitrix.ssh.addProfile",
+					"when": "view == bitrixSshExplorer",
+					"group": "navigation@9"
+				},
+				{
+					"command": "bitrix.index.rebuild",
+					"when": "view == bitrixIndex",
+					"group": "navigation@1"
+				},
+				{
+					"command": "bitrix.index.stats",
+					"when": "view == bitrixIndex",
+					"group": "navigation@2"
+				}
+			],
+			"explorer/context": [
+				{
+					"command": "bitrix.ssh.upload",
+					"when": "resourceScheme == file && bitrix.sshConnected",
+					"group": "bitrix@1"
+				},
+				{
+					"command": "bitrix.ssh.download",
+					"when": "resourceScheme == file && bitrix.sshConnected",
+					"group": "bitrix@2"
+				},
+				{
+					"command": "bitrix.ssh.compareRemote",
+					"when": "resourceScheme == file && bitrix.sshConnected",
+					"group": "bitrix@3"
+				}
+			],
+			"view/item/context": [
+				{
+					"command": "bitrix.ssh.preview",
+					"when": "view == bitrixSshExplorer && viewItem == remoteFile",
+					"group": "inline@1"
+				},
+				{
+					"command": "bitrix.ssh.preview",
+					"when": "view == bitrixSshExplorer && viewItem == remoteFile",
+					"group": "1_open@1"
+				},
+				{
+					"command": "bitrix.ssh.downloadRemote",
+					"when": "view == bitrixSshExplorer && (viewItem == remoteFile || viewItem == remoteDirectory)",
+					"group": "2_sync@1"
+				},
+				{
+					"command": "bitrix.ssh.uploadLocal",
+					"when": "view == bitrixSshExplorer && (viewItem == remoteFile || viewItem == remoteDirectory)",
+					"group": "2_sync@2"
+				},
+				{
+					"command": "bitrix.ssh.copyRemotePath",
+					"when": "view == bitrixSshExplorer && (viewItem == remoteFile || viewItem == remoteDirectory)",
+					"group": "9_copy@1"
+				},
+				{
+					"command": "bitrix.ssh.compareRemote",
+					"when": "view == bitrixSshExplorer && viewItem == remoteFile",
+					"group": "1_open@2"
+				},
+				{
+					"command": "bitrix.ssh.openLocal",
+					"when": "view == bitrixSshExplorer && viewItem == remoteFile",
+					"group": "1_open@3"
+				}
+			],
+			"commandPalette": [
+				{
+					"command": "bitrix.showMenu",
+					"when": "false"
+				}
+			],
+			"editor/title/context": [
+				{
+					"command": "bitrix.ssh.compareRemote",
+					"when": "resourceScheme == file && bitrix.sshConnected",
+					"group": "navigation@1"
+				}
+			]
+		},
+		"viewsWelcome": [
+			{
+				"view": "bitrixSshExplorer",
+				"contents": "Нет SSH-подключения.\n[Подключиться к серверу](command:bitrix.ssh.connect)\n[Добавить профиль](command:bitrix.ssh.addProfile)\n\nПосле подключения здесь появится дерево файлов. Файлы открываются только для просмотра."
+			}
+		],
+		"keybindings": [
+			{
+				"command": "bitrix.ssh.switchProfile",
+				"key": "ctrl+alt+p",
+				"mac": "cmd+alt+p"
+			},
+			{
+				"command": "bitrix.ssh.upload",
+				"key": "ctrl+alt+u",
+				"mac": "cmd+alt+u",
+				"when": "editorTextFocus"
+			},
+			{
+				"command": "bitrix.ssh.saveAndUpload",
+				"key": "ctrl+alt+s",
+				"mac": "cmd+alt+s",
+				"when": "editorTextFocus"
+			}
+		]
+	},
+	"scripts": {
+		"vscode:prepublish": "npm run compile",
+		"compile": "tsc -p ./",
+		"watch": "tsc -watch -p ./",
+		"test": "npm run compile && node --test out/test/*.test.js",
+		"build:php": "bash scripts/build-php.sh",
+		"package": "bash scripts/package-platforms.sh",
+		"test:e2e": "npm run compile && node scripts/e2e-lsp.mjs",
+		"package:platforms": "bash scripts/package-platforms.sh",
+		"package:universal": "npx @vscode/vsce package",
+		"test:host": "npm run compile && node out/test/integration/runTest.js"
+	},
+	"dependencies": {
+		"jsonc-parser": "^3.3.1",
+		"ssh2": "^1.16.0",
+		"vscode-languageclient": "^9.0.1"
+	},
+	"devDependencies": {
+		"@types/node": "^24.0.0",
+		"@types/ssh2": "^1.15.1",
+		"@types/vscode": "^1.100.0",
+		"@vscode/test-electron": "^3.1.0",
+		"@vscode/vsce": "^3.1.0",
+		"typescript": "^5.6.0"
+	},
+	"icon": "media/icon.png",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/pesherind/bitrix-assistant.git"
+	},
+	"bugs": {
+		"url": "https://github.com/pesherind/bitrix-assistant/issues"
+	},
+	"homepage": "https://github.com/pesherind/bitrix-assistant#readme",
+	"galleryBanner": {
+		"color": "#0b4a6f",
+		"theme": "dark"
+	}
+}

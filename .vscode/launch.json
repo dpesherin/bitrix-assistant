@@ -1,0 +1,36 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
+      "outFiles": ["${workspaceFolder}/out/**/*.js"],
+      "preLaunchTask": "npm: compile",
+      "env": {
+        "BITRIX_LSP_DEBUG": "1"
+      }
+    },
+    {
+      "name": "Run Extension (system php for LSP)",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}"],
+      "outFiles": ["${workspaceFolder}/out/**/*.js"],
+      "preLaunchTask": "npm: compile",
+      "settings": {
+        "bitrix.lsp.phpBinary": "/usr/bin/php"
+      }
+    },
+    {
+      "name": "Attach to PHP LSP (Xdebug)",
+      "type": "php",
+      "request": "launch",
+      "port": 9003,
+      "pathMappings": {
+        "${workspaceFolder}/server": "${workspaceFolder}/server"
+      }
+    }
+  ]
+}

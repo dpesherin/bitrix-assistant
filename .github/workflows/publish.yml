@@ -1,0 +1,107 @@
+name: Publish extension
+
+# Публикация в VS Code Marketplace через Trusted Publishing (OIDC), без PAT.
+#
+# Перед первым запуском:
+#   1. Marketplace → publisher pesherind → Trusted Publishing → Create:
+#        repository owner: pesherind
+#        repository:       bitrix-assistant
+#        workflow:         publish.yml
+#        environment:      marketplace
+#   2. Хотя бы раз выполнить workflow «Build static PHP for LSP» — из его
+#      артефактов берутся бинарники PHP (в git они не хранятся).
+#
+# Платформенные пакеты: в .vsix едет только бинарник своей платформы,
+# поэтому публикуем по одной платформе с одинаковым номером версии.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Версия x.y.z (пусто — взять из package.json)'
+        required: false
+        default: ''
+      targets:
+        description: 'Платформы через запятую'
+        required: false
+        default: 'darwin-arm64,darwin-x64,linux-x64,linux-arm64,win32-x64'
+
+permissions:
+  contents: read
+  id-token: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: marketplace
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build LSP phar
+        run: php -d phar.readonly=0 scripts/build-phar.php
+
+      # Бинарники PHP в git не хранятся (.gitignore): берём их из последнего
+      # успешного прогона workflow «Build static PHP for LSP».
+      - name: Find latest static PHP build
+        id: php-build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id=$(gh api "repos/${{ github.repository }}/actions/workflows/build-php.yml/runs?status=success&per_page=1" --jq '.workflow_runs[0].id')
+          if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
+            echo "Не найден успешный прогон build-php.yml — сначала соберите бинарники PHP" >&2
+            exit 1
+          fi
+          echo "run-id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "Бинарники из прогона $run_id"
+
+      - name: Download static PHP binaries
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ steps.php-build.outputs.run-id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+          pattern: static-php-*
+          merge-multiple: true
+          path: server/bin
+
+      - name: Check binaries
+        run: |
+          set -euo pipefail
+          chmod +x server/bin/php-* || true
+          ls -la server/bin
+          count=$(ls server/bin/php-* 2>/dev/null | wc -l | tr -d ' ')
+          if [ "$count" -ne 5 ]; then
+            echo "Ожидалось 5 бинарников PHP, найдено $count — публикация остановлена" >&2
+            exit 1
+          fi
+
+      - name: Compile extension
+        run: npm run compile
+
+      - name: Tests
+        run: npm test
+
+      - name: Publish per platform
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_TARGETS: ${{ inputs.targets }}
+        run: |
+          set -euo pipefail
+          version="${INPUT_VERSION:-$(node -p "require('./package.json').version")}"
+          targets="${INPUT_TARGETS:-darwin-arm64,darwin-x64,linux-x64,linux-arm64,win32-x64}"
+          echo "Версия: $version"
+          for target in ${targets//,/ }; do
+            echo "==> $target"
+            npx --yes @vscode/vsce publish --oidc --target "$target" "$version"
+          done

@@ -1,0 +1,26 @@
+# Исходники TS не нужны в рантайме (компилируются в out/).
+src/**
+test/**
+out/test/**
+**/*.map
+**/*.ts
+# PHP-исходники LSP остаются только в репозитории:
+# в .vsix едет server/bin/<php-binary> + server/bin/bitrix-lsp.phar.
+server/src/**
+server/tests/**
+server/craft.yml
+scripts/**
+docs/**
+craft.yml
+tsconfig.json
+.gitignore
+.vscode/**
+.github/**
+# Служебное
+**/.DS_Store
+**/*.vsix
+# Скриншоты и служебные файлы в корне репозитория
+*.png
+!media/icon.png
+package-lock.json
+server/bin/.gitkeep

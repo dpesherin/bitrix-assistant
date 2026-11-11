@@ -1,0 +1,76 @@
+name: Build static PHP for LSP
+
+# Собирает статические бинарники PHP (server/bin/php-<os>-<arch>) под все
+# поддерживаемые платформы. Запускается вручную или на тег v*.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            key: linux-x64
+            spc: spc-linux-x86_64
+            binary: php-linux-x64
+          - os: ubuntu-24.04-arm
+            key: linux-arm64
+            spc: spc-linux-aarch64
+            binary: php-linux-arm64
+          - os: macos-13
+            key: darwin-x64
+            spc: spc-macos-x86_64
+            binary: php-darwin-x64
+          - os: macos-14
+            key: darwin-arm64
+            spc: spc-macos-aarch64
+            binary: php-darwin-arm64
+          - os: windows-2022
+            key: win32-x64
+            spc: spc-windows-x64.exe
+            binary: php-win32-x64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download static-php-cli
+        shell: bash
+        run: |
+          curl -#fSL "https://dl.static-php.dev/v3/spc-bin/nightly/${{ matrix.spc }}" -o spc
+          chmod +x spc || true
+
+      - name: Check build environment
+        shell: bash
+        run: ./spc doctor --auto-fix
+
+      - name: Build PHP (craft.yml)
+        shell: bash
+        run: ./spc craft
+
+      - name: Collect binary
+        shell: bash
+        run: |
+          mkdir -p server/bin
+          if [ -f buildroot/bin/php ]; then
+            cp buildroot/bin/php "server/bin/${{ matrix.binary }}"
+          else
+            cp buildroot/bin/php.exe "server/bin/${{ matrix.binary }}"
+          fi
+          chmod +x "server/bin/${{ matrix.binary }}" || true
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          "server/bin/${{ matrix.binary }}" -v
+          "server/bin/${{ matrix.binary }}" -m | grep -Ei 'pdo_sqlite|sqlite3|mbstring|tokenizer|phar|pcntl'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: static-php-${{ matrix.key }}
+          path: server/bin/${{ matrix.binary }}
+          if-no-files-found: error
