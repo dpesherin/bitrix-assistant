@@ -704,3 +704,35 @@ find server/src -name '*.php' -print0 | xargs -0 -n1 php -l
   для функций и констант такого Quick Fix нет.
 - Расширение не изменяет файлы само, кроме явных команд (`bitrix.orm.generateAnnotations`)
   и Quick Fix, применяемых пользователем.
+
+## Публикация в Marketplace
+
+Релиз идёт через `.github/workflows/publish.yml` и Trusted Publishing (OIDC, без PAT):
+политика в Marketplace — owner `dpesherin`, repo `bitrix-assistant`, workflow `publish.yml`,
+environment `marketplace`.
+
+**Одна платформа за прогон.** Marketplace склеивает быстрые загрузки одной и той же версии
+в один пакет: прогон с пятью платформами закрепляет только первую, остальные vsce показывает
+как «Published», но в галерее их нет. Проверено дважды. Поэтому:
+
+```bash
+for t in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64; do
+  gh workflow run publish.yml -f targets="$t" || \
+  curl -s -X POST -H "Authorization: Bearer $GH_TOKEN" \
+    https://api.github.com/repos/dpesherin/bitrix-assistant/actions/workflows/publish.yml/dispatches \
+    -d "{\"ref\":\"main\",\"inputs\":{\"targets\":\"$t\"}}"
+  gh run watch   # дождаться завершения перед следующей платформой
+done
+```
+
+Проверка, что пакет действительно лёг в галерею (по платформе):
+
+```bash
+curl -s -X POST https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json;api-version=7.2-preview.1' \
+  -d '{"filters":[{"criteria":[{"filterType":7,"value":"pesherind.bitrix-assistant"},
+      {"filterType":11,"value":"linux-x64"}]}],"flags":403}'
+```
+
+`filterType: 11` — фильтр по target platform; без него галерея отдаёт только один пакет версии.

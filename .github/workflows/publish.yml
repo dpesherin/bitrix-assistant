@@ -21,10 +21,13 @@ on:
         description: 'Версия x.y.z (пусто — взять из package.json)'
         required: false
         default: ''
+      # Marketplace склеивает быстрые загрузки одной версии в один пакет:
+      # при пяти платформах в одном прогоне закрепляется только первая.
+      # Проверено: один прогон = одна платформа. Публикуйте по одной.
       targets:
-        description: 'Платформы через запятую'
+        description: 'Платформы через запятую. Надёжно — по одной за прогон'
         required: false
-        default: 'darwin-arm64,darwin-x64,linux-x64,linux-arm64,win32-x64'
+        default: 'darwin-arm64'
 
 permissions:
   contents: read
