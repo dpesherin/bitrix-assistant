@@ -355,7 +355,15 @@ final class PhpCompletionProvider
 	): array {
 		foreach ($this->inference->variableCandidates($context, '$' . $variable, $offset) as $candidate) {
 			if ($this->repository->classByName($candidate) !== null) {
-				return $this->memberItems($document, $offset, $candidate, $partial, true, false);
+				return $this->memberItems(
+					$document,
+					$offset,
+					$candidate,
+					$partial,
+					true,
+					false,
+					strtolower($variable) === 'this',
+				);
 			}
 		}
 		return [];
@@ -386,11 +394,27 @@ final class PhpCompletionProvider
 				}
 				$fqcn = $parent;
 			}
-			return $this->memberItems($document, $offset, $fqcn, $partial, false, true);
+			return $this->memberItems(
+				$document,
+				$offset,
+				$fqcn,
+				$partial,
+				false,
+				true,
+				strcasecmp(ltrim($context->classAt($offset)['fqcn'] ?? '', '\\'), ltrim($fqcn, '\\')) === 0,
+			);
 		}
 		foreach ($context->classCandidates($name) as $candidate) {
 			if ($this->repository->classByName($candidate) !== null) {
-				return $this->memberItems($document, $offset, $candidate, $partial, false, true);
+				return $this->memberItems(
+					$document,
+					$offset,
+					$candidate,
+					$partial,
+					false,
+					true,
+					strcasecmp(ltrim($context->classAt($offset)['fqcn'] ?? '', '\\'), ltrim($candidate, '\\')) === 0,
+				);
 			}
 		}
 		return [];
@@ -406,11 +430,15 @@ final class PhpCompletionProvider
 		string $partial,
 		bool $includeProperties,
 		bool $includeConstants,
+		bool $fromInside = false,
 	): array {
 		$range = $document->range($offset - strlen($partial), $offset);
 		$items = [];
 		$seen = [];
-		$matches = static fn (string $name): bool => $partial === '' || stripos($name, $partial) === 0;
+		// Фильтрацию по введённому префиксу делает VS Code (filterText): если
+		// отфильтровать на сервере и не останется совпадений, редактор добавит
+		// «слова» из всех открытых файлов — в большом проекте это сотни чужих имён.
+		$matches = static fn (string $name): bool => true;
 		// Порядок: свои члены класса (0) → унаследованные (1) → магические (2),
 		// внутри каждой группы — по алфавиту.
 		$owner = ltrim($class, '\\');
@@ -424,6 +452,14 @@ final class PhpCompletionProvider
 		foreach ($this->repository->methodsForClassWithParents($class) as $method) {
 			$name = (string) $method['name'];
 			if (!$matches($name)) {
+				continue;
+			}
+			// Магические методы (`__construct` и т.п.) не предлагаем после `->`/`::`:
+			// вызвать их явно нельзя, а в списке они путают.
+			if (str_starts_with($name, '__')) {
+				continue;
+			}
+			if (!$fromInside && (string) ($method['visibility'] ?? 'public') !== 'public') {
 				continue;
 			}
 			$declaredIn = ltrim((string) ($method['class_fqcn'] ?? $class), '\\');
@@ -466,6 +502,9 @@ final class PhpCompletionProvider
 			foreach ($this->repository->propertiesForClassWithParents($class) as $property) {
 				$name = (string) $property['name'];
 				if (!$matches($name) || isset($seen[$name])) {
+					continue;
+				}
+				if (!$fromInside && (string) ($property['visibility'] ?? 'public') !== 'public') {
 					continue;
 				}
 				$declaredIn = ltrim((string) ($property['class_fqcn'] ?? $class), '\\');

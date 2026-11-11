@@ -317,6 +317,18 @@ final class Server
 	/**
 	 * @param array<string, mixed> $params
 	 */
+	/** Позиция внутри <script>…</script> (инлайн-JS в PHP-шаблоне). */
+	private function isJsContext(string $text, int $offset): bool
+	{
+		$before = substr($text, 0, max(0, $offset));
+		$open = strripos($before, '<script');
+		if ($open === false) {
+			return false;
+		}
+		$close = strripos($before, '</script');
+		return $close === false || $close < $open;
+	}
+
 	private function completion(array $params): array
 	{
 		$document = $this->document($params);
@@ -328,7 +340,9 @@ final class Server
 		$before = substr($document->text, $from, $offset - $from);
 		$items = [];
 		$isJs = in_array($document->languageId, self::JS_LANGUAGES, true)
-			|| preg_match('/\bBX\.[A-Za-z0-9_.$]*$/', $before) === 1;
+			|| ($document->languageId === 'php'
+				&& preg_match('/\bBX\.[A-Za-z0-9_.$]*$/', $before) === 1
+				&& $this->isJsContext($document->text, $offset));
 		if ($isJs) {
 			$items = $this->jsCompletion->provide($document, $offset);
 		}
@@ -353,7 +367,16 @@ final class Server
 			return $this->jsHover->provide($document, $offset);
 		}
 		if ($document->languageId === 'php') {
-			return $this->jsHover->provide($document, $offset) ?? $this->phpHover->provide($document, $offset);
+			// Сначала PHP: JS-анализатор ищет по имени члена и на PHP-коде
+			// находит чужие методы (`time` из bitrix/js/...). JS — только там,
+			// где действительно JS-выражение (`BX.…`) или внутри <script>.
+			$phpHover = $this->phpHover->provide($document, $offset);
+			if ($phpHover !== null) {
+				return $phpHover;
+			}
+			return $this->isJsContext($document->text, $offset)
+				? $this->jsHover->provide($document, $offset)
+				: null;
 		}
 		return null;
 	}
@@ -373,8 +396,13 @@ final class Server
 			return $this->jsDefinition->provide($document, $offset);
 		}
 		if ($document->languageId === 'php') {
-			$js = $this->jsDefinition->provide($document, $offset);
-			return $js !== [] ? $js : $this->phpDefinition->provide($document, $offset);
+			$php = $this->phpDefinition->provide($document, $offset);
+			if ($php !== []) {
+				return $php;
+			}
+			return $this->isJsContext($document->text, $offset)
+				? $this->jsDefinition->provide($document, $offset)
+				: [];
 		}
 		return [];
 	}

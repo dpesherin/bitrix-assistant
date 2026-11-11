@@ -2,7 +2,7 @@
 	"name": "bitrix-assistant",
 	"displayName": "Bitrix Assistant",
 	"description": "Индекс ядра 1С-Битрикс, подсказки PHP и JS (LSP), SSH-синхронизация с сервером и терминал на сервере — без внешних сервисов и LLM",
-	"version": "0.3.4",
+	"version": "0.3.5",
 	"publisher": "pesherind",
 	"license": "MIT",
 	"engines": {
@@ -522,7 +522,12 @@
 				"mac": "cmd+alt+s",
 				"when": "editorTextFocus"
 			}
-		]
+		],
+		"configurationDefaults": {
+			"[php]": {
+				"editor.wordBasedSuggestions": "currentDocument"
+			}
+		}
 	},
 	"scripts": {
 		"vscode:prepublish": "npm run compile",
