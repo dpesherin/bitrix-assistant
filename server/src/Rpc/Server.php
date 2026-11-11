@@ -317,6 +317,15 @@ final class Server
 	/**
 	 * @param array<string, mixed> $params
 	 */
+	/** Позиция внутри PHP-блока (`<?php … ?>`, `<?= … ?>`, `<? … ?>`). */
+	private function isPhpContext(string $text, int $offset): bool
+	{
+		$before = substr($text, 0, max(0, $offset));
+		$open = strrpos($before, '<?');
+		$close = strrpos($before, '?>');
+		return $open !== false && ($close === false || $open > $close);
+	}
+
 	/** Позиция внутри <script>…</script> (инлайн-JS в PHP-шаблоне). */
 	private function isJsContext(string $text, int $offset): bool
 	{
@@ -339,17 +348,17 @@ final class Server
 		$from = max(0, $offset - 200);
 		$before = substr($document->text, $from, $offset - $from);
 		$items = [];
-		$isJs = in_array($document->languageId, self::JS_LANGUAGES, true)
+		$inPhp = $document->languageId === 'php' && $this->isPhpContext($document->text, $offset);
+		$jsOnly = in_array($document->languageId, self::JS_LANGUAGES, true)
 			|| ($document->languageId === 'php'
-				&& preg_match('/\bBX\.[A-Za-z0-9_.$]*$/', $before) === 1
+				&& !$inPhp
 				&& $this->isJsContext($document->text, $offset));
-		if ($isJs) {
-			$items = $this->jsCompletion->provide($document, $offset);
+		if ($jsOnly) {
+			// Внутри <script> PHP-подсказки не примешиваем: иначе в параметрах
+			// JS-вызова появлялись функции PHP.
+			return $this->jsCompletion->provide($document, $offset);
 		}
-		if ($items === [] && $document->languageId === 'php') {
-			$items = $this->phpCompletion->provide($document, $offset);
-		}
-		return $items;
+		return $this->phpCompletion->provide($document, $offset);
 	}
 
 	/**
@@ -367,16 +376,12 @@ final class Server
 			return $this->jsHover->provide($document, $offset);
 		}
 		if ($document->languageId === 'php') {
-			// Сначала PHP: JS-анализатор ищет по имени члена и на PHP-коде
-			// находит чужие методы (`time` из bitrix/js/...). JS — только там,
-			// где действительно JS-выражение (`BX.…`) или внутри <script>.
-			$phpHover = $this->phpHover->provide($document, $offset);
-			if ($phpHover !== null) {
-				return $phpHover;
+			if (!$this->isPhpContext($document->text, $offset) && $this->isJsContext($document->text, $offset)) {
+				return $this->jsHover->provide($document, $offset);
 			}
-			return $this->isJsContext($document->text, $offset)
-				? $this->jsHover->provide($document, $offset)
-				: null;
+			// Сначала PHP: JS-анализатор ищет по имени члена и на PHP-коде
+			// находит чужие методы (`time` из bitrix/js/...).
+			return $this->phpHover->provide($document, $offset);
 		}
 		return null;
 	}
@@ -396,13 +401,10 @@ final class Server
 			return $this->jsDefinition->provide($document, $offset);
 		}
 		if ($document->languageId === 'php') {
-			$php = $this->phpDefinition->provide($document, $offset);
-			if ($php !== []) {
-				return $php;
+			if (!$this->isPhpContext($document->text, $offset) && $this->isJsContext($document->text, $offset)) {
+				return $this->jsDefinition->provide($document, $offset);
 			}
-			return $this->isJsContext($document->text, $offset)
-				? $this->jsDefinition->provide($document, $offset)
-				: [];
+			return $this->phpDefinition->provide($document, $offset);
 		}
 		return [];
 	}
@@ -579,7 +581,11 @@ final class Server
 		}
 		$offset = $this->offset($document, $params);
 		if ($document->languageId === 'php') {
-			return $this->phpSignatureHelp->provide($document, $offset);
+			$jsInline = !$this->isPhpContext($document->text, $offset)
+				&& $this->isJsContext($document->text, $offset);
+			return $jsInline
+				? $this->jsSignatureHelp->provide($document, $offset)
+				: $this->phpSignatureHelp->provide($document, $offset);
 		}
 		if (in_array($document->languageId, self::JS_LANGUAGES, true)) {
 			return $this->jsSignatureHelp->provide($document, $offset);

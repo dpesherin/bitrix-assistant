@@ -150,6 +150,13 @@ final class PhpSemanticDiagnostics
 				if ($close <= $open) {
 					continue;
 				}
+				$visibility = $this->visibilityDiagnostic($document, $nameOffset, $name, $reference);
+				if ($visibility !== null) {
+					$diagnostics[] = $visibility;
+					if (count($diagnostics) >= self::MAX) {
+						break;
+					}
+				}
 				if (!$this->symbolsOnly) {
 					$diagnostics = array_merge(
 						$diagnostics,
@@ -203,6 +210,82 @@ final class PhpSemanticDiagnostics
 			$diagnostics = array_merge($diagnostics, $this->undefinedVariables($document, $masked));
 		}
 		return array_slice($diagnostics, 0, self::MAX);
+	}
+
+	/**
+	 * Вызов private/protected метода снаружи класса — в PHP это фатальная ошибка.
+	 *
+	 * @param array{method: array<string, mixed>, class: string} $reference
+	 * @return array<string, mixed>|null
+	 */
+	private function visibilityDiagnostic(
+		TextDocument $document,
+		int $nameOffset,
+		string $name,
+		array $reference,
+	): ?array {
+		$visibility = strtolower((string) ($reference['method']['visibility'] ?? 'public'));
+		if ($visibility === 'public' || $visibility === '' || str_starts_with($name, '__')) {
+			return null;
+		}
+		$declaring = ltrim((string) ($reference['method']['class_fqcn'] ?? ''), '\\');
+		if ($declaring === '') {
+			return null;
+		}
+		$declaringRow = $this->repository->classByName($declaring);
+		if ($declaringRow === null) {
+			return null;
+		}
+		// Трейты: метод «приезжает» в класс, отдельного класса-владельца нет.
+		if ((string) ($declaringRow['kind'] ?? '') === 'trait') {
+			return null;
+		}
+		if (stripos((string) ($declaringRow['doc'] ?? ''), '@method') !== false) {
+			return null;
+		}
+		$caller = PhpDocumentContext::create($document)->classAt($nameOffset);
+		$callerFqcn = $caller !== null ? ltrim((string) $caller['fqcn'], '\\') : '';
+		if ($callerFqcn !== '' && strcasecmp($callerFqcn, $declaring) === 0) {
+			return null;
+		}
+		if ($visibility === 'protected' && $callerFqcn !== '' && $this->isSubclassOf($callerFqcn, $declaring)) {
+			return null;
+		}
+		$where = $callerFqcn === '' ? 'вне класса' : "в классе {$callerFqcn}";
+		return [
+			'range' => $document->range($nameOffset, $nameOffset + strlen($name)),
+			'severity' => 1,
+			'source' => 'bitrix',
+			'code' => 'bitrix.php.method-visibility',
+			'message' => "Метод {$name}() объявлен как {$visibility} в {$declaring} и недоступен {$where}.",
+			'data' => ['kind' => 'method-visibility', 'name' => $name, 'class' => $declaring, 'visibility' => $visibility],
+		];
+	}
+
+	/** Наследник ли класс (по цепочке extends в индексе). */
+	private function isSubclassOf(string $class, string $parent): bool
+	{
+		$current = $class;
+		$seen = [];
+		for ($guard = 0; $guard < 25; $guard++) {
+			if (isset($seen[$current])) {
+				return false;
+			}
+			$seen[$current] = true;
+			$row = $this->repository->classByName($current);
+			if ($row === null) {
+				return false;
+			}
+			$next = $this->repository->parentClassName($row);
+			if ($next === null || $next === '') {
+				return false;
+			}
+			if (strcasecmp(ltrim($next, '\\'), $parent) === 0) {
+				return true;
+			}
+			$current = ltrim($next, '\\');
+		}
+		return false;
 	}
 
 	/**

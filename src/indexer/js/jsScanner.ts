@@ -404,13 +404,19 @@ function scanJsClasses(
 			continue;
 		}
 		const isExported = /\bexport\b/.test(m[0]);
-		const classOffset = m.index + m[0].indexOf('class') + 'class'.length;
-		const docBefore = findJsDocBefore(content, m.index + m[0].indexOf('class'));
+		const classKeyword = m.index + m[0].indexOf('class');
+		const classOffset = classKeyword + 'class'.length;
+		// JSDoc ищем от начала объявления: между `*/` и `class` может стоять
+		// `export`/`abstract`, а findJsDocBefore требует только пробелы.
+		const lineStart = content.lastIndexOf('\n', classKeyword) + 1;
+		const indentMatch = /^\s*/.exec(content.slice(lineStart, classKeyword));
+		const declarationStart = lineStart + (indentMatch ? indentMatch[0].length : 0);
+		const docBefore = findJsDocBefore(content, declarationStart);
 		const memberOf = docBefore
-			? /@memberOf\s+\{?\s*(BX(?:\.[A-Za-z0-9_$]+)+)/.exec(docBefore)?.[1]
+			? /@memberof\s+\{?\s*(BX(?:\.[A-Za-z0-9_$]+)+)/i.exec(docBefore)?.[1]
 			: undefined;
 		const localNamespace = memberOf
-			?? (docBefore ? /@namespace\s*\{?\s*(BX(?:\.[A-Za-z0-9_$]+)+)/.exec(docBefore)?.[1] : undefined)
+			?? (docBefore ? /@namespace\s*\{?\s*(BX(?:\.[A-Za-z0-9_$]+)+)/i.exec(docBefore)?.[1] : undefined)
 			?? namespace;
 		const qualified =
 			localNamespace !== '' && (isExported || memberOf !== undefined)
@@ -787,7 +793,7 @@ export function scanJsGlobals(content: string, maxBytes = DEFAULT_MAX_BYTES): Js
 	}
 	// `@memberOf BX.Main.Popup` + следующая декларация → конструктор/класс
 	// внутри namespace (например, `BX.Main.Popup.Button`).
-	const memberOfRe = /@memberOf\s+(BX(?:\.[A-Za-z0-9_$]+)+)/g;
+	const memberOfRe = /@memberof\s+(BX(?:\.[A-Za-z0-9_$]+)+)/gi;
 	for (let m = memberOfRe.exec(content); m; m = memberOfRe.exec(content)) {
 		const tail = content.slice(m.index + m[0].length, m.index + m[0].length + 500);
 		const declaration = /\b(class|function|const|let|var)\s+([A-Za-z_$][\w$]*)/.exec(tail);
@@ -800,7 +806,7 @@ export function scanJsGlobals(content: string, maxBytes = DEFAULT_MAX_BYTES): Js
 		}
 	}
 
-	const jsdocNamespace = /@namespace\s*\{?\s*(BX(?:\.[A-Za-z0-9_$]+)+)/.exec(content);
+	const jsdocNamespace = /@namespace\s*\{?\s*(BX(?:\.[A-Za-z0-9_$]+)+)/i.exec(content);
 	scanJsClasses(content, src, found, push, starts, jsdocNamespace?.[1] ?? '');
 
 	const exportListRe = /\bexport\s*\{([^}]*)\}/g;
