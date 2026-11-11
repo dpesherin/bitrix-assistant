@@ -3,6 +3,18 @@
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версии — [SemVer](https://semver.org/lang/ru/).
 Ведём с текущей версии.
 
+## [0.3.16]
+
+### Добавлено
+
+- **Flow-narrowing для `instanceof`**: тип переменной сужается внутри блока
+  `if ($x instanceof Foo) { … }`, после guard-проверки `if (!$x instanceof Foo) { return; }`
+  и после `assert($x instanceof Foo);`. Работает в hover (показывает конкретный класс
+  вместо `mixed`/интерфейса) и в «Go to Type Definition», а значит и в подсказках
+  по членам суженного типа.
+- Сужение учитывает `use`-алиасы документа и проверяет, что класс есть в индексе,
+  поэтому одноимённые классы из других namespace не подставляются.
+
 ## [0.3.15]
 
 ### Добавлено

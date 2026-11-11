@@ -1224,6 +1224,48 @@ check(
 	'PHP: implementation метода → переопределение в наследнике',
 );
 
+const narrowText = [
+	'<?php',
+	'namespace Vendor\\Demo;',
+	'',
+	'function narrow(mixed $value): void',
+	'{',
+	'    if ($value instanceof \\Vendor\\Demo\\ParentWorker) {',
+	'        $value->work();',
+	'    }',
+	'}',
+	'',
+].join('\n');
+const narrowUri = pathToFileURL(path.join(site, 'local/php_interface/narrow.php')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: narrowUri, languageId: 'php', version: 1, text: narrowText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === narrowUri);
+
+const narrowHoverRequest = request('textDocument/hover', {
+	textDocument: { uri: narrowUri },
+	position: { line: 6, character: 10 },
+});
+send(narrowHoverRequest);
+const narrowHover = await waitFor((message) => message.id === narrowHoverRequest.id);
+check(
+	String(narrowHover.result?.contents?.value ?? '').replace(/<[^>]+>/g, '').includes('ParentWorker'),
+	'PHP: тип переменной сужен внутри instanceof',
+);
+
+const narrowTypeRequest = request('textDocument/typeDefinition', {
+	textDocument: { uri: narrowUri },
+	position: { line: 6, character: 10 },
+});
+send(narrowTypeRequest);
+const narrowType = await waitFor((message) => message.id === narrowTypeRequest.id);
+check(
+	Array.isArray(narrowType.result) && narrowType.result[0]?.uri?.endsWith('/parent_worker.php'),
+	'PHP: typeDefinition учитывает сужение instanceof',
+);
+
 const foldingRequest = request('textDocument/foldingRange', { textDocument: { uri: methodUri } });
 send(foldingRequest);
 const foldingResult = await waitFor((message) => message.id === foldingRequest.id);

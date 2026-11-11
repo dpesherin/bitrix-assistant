@@ -15,6 +15,7 @@ final class PhpHoverProvider
 	public function __construct(
 		private readonly Repository $repository,
 		private readonly PhpMethodResolver $resolver,
+		private readonly ?PhpTypeInference $inference = null,
 	) {
 	}
 
@@ -229,6 +230,53 @@ final class PhpHoverProvider
 		return implode("\n\n---\n\n", $lines);
 	}
 
+	/**
+	 * Уточняет показанный тип переменной: если вывод даёт конкретный класс
+	 * (в том числе после `instanceof`/`assert`), показываем его.
+	 */
+	private function narrowedVariableType(TextDocument $document, int $offset, string $name, string $type): string
+	{
+		if ($this->inference === null) {
+			return $type;
+		}
+		// Дорогой разбор файла запускаем только там, где сужение в принципе возможно.
+		if (strcasecmp($type, 'mixed') !== 0 && stripos($document->text, 'instanceof') === false) {
+			return $type;
+		}
+		$context = PhpDocumentContext::create($document);
+		$candidates = $this->inference->variableCandidates($context, $name, $offset);
+		if (count($candidates) !== 1) {
+			return $type;
+		}
+		$candidate = $candidates[0];
+		$row = $this->repository->classByName($candidate);
+		if ($row === null) {
+			return $type;
+		}
+		$short = (string) ($row['name'] ?? '');
+		if ($short === '') {
+			return $type;
+		}
+		$current = ltrim(trim($type), '?\\');
+		if (strcasecmp($current, $short) === 0 || strcasecmp($current, $candidate) === 0) {
+			return $type;
+		}
+		$declared = null;
+		foreach ($context->classCandidates($current) as $declaredCandidate) {
+			if ($this->repository->classByName($declaredCandidate) !== null) {
+				$declared = $declaredCandidate;
+				break;
+			}
+		}
+		if ($declared !== null && !$this->repository->classIsA($candidate, $declared)) {
+			return $type; // не сужение, а что-то другое — не подменяем
+		}
+		if ($declared === null && strcasecmp($current, 'mixed') !== 0) {
+			return $type;
+		}
+		return $short;
+	}
+
 	private function localVariableHover(TextDocument $document, int $offset): ?array
 	{
 		$token = PhpUseMap::tokenAt($document->text, $offset);
@@ -246,6 +294,7 @@ final class PhpHoverProvider
 		$var = $this->varAnnotation($before, $name);
 		$global = PhpDocumentContext::globalClass($name);
 		$type = $parameter ?? $var ?? $this->assignmentType($document->text, $offset, $name, 0) ?? $global ?? 'mixed';
+		$type = $this->narrowedVariableType($document, $offset, $name, $type);
 		$kind = $parameter !== null
 			? 'параметр'
 			: ($global !== null && $var === null ? 'глобальная переменная' : 'локальная переменная');

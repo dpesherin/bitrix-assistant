@@ -61,6 +61,12 @@ final class PhpDocumentContext
 		return $this->text;
 	}
 
+	/** Текст с замаскированными строками и комментариями (смещения сохраняются). */
+	public function masked(): string
+	{
+		return $this->masked;
+	}
+
 	/**
 	 * @return array<string, string>
 	 */

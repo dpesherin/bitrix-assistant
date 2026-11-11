@@ -31,6 +31,21 @@ final class PhpTypeInference
 		if ($variable === '' || $depth > self::MAX_DEPTH) {
 			return [];
 		}
+		$base = $this->baseCandidates($context, $variable, $offset, $depth);
+		$narrowed = $this->narrowedType($context, $variable, $offset);
+		if ($narrowed === null) {
+			return $base;
+		}
+		return array_values(array_unique(array_merge([$narrowed], $base)));
+	}
+
+	/**
+	 * Вывод без учёта сужения типа (`instanceof`, `assert`).
+	 *
+	 * @return array<int, string>
+	 */
+	private function baseCandidates(PhpDocumentContext $context, string $variable, int $offset, int $depth): array
+	{
 		$base = $context->typeCandidatesOfVariable('$' . $variable, $offset);
 		if ($base !== []) {
 			return $base;
@@ -40,6 +55,130 @@ final class PhpTypeInference
 			return [];
 		}
 		return $this->expressionCandidates($context, $rhs, $offset, $depth + 1);
+	}
+
+	/**
+	 * Сужение типа по guard-проверкам до позиции курсора:
+	 * `if ($x instanceof Foo) { … }`, `if (!$x instanceof Foo) { return; }`,
+	 * `assert($x instanceof Foo);` — тип после проверки.
+	 */
+	private function narrowedType(PhpDocumentContext $context, string $variable, int $offset): ?string
+	{
+		$text = $context->masked();
+		$pattern = '/\$' . preg_quote($variable, '/') . '\s+instanceof\s+(\\\\?[A-Za-z_][A-Za-z0-9_\\\\]*)/';
+		if (preg_match_all($pattern, $text, $matches, PREG_OFFSET_CAPTURE) === false) {
+			return null;
+		}
+		$best = null;
+		$bestStart = -1;
+		foreach ($matches[0] as $index => $whole) {
+			$start = $whole[1];
+			if ($start >= $offset || $start < $bestStart) {
+				continue;
+			}
+			$class = $this->narrowedClass($context, $matches[1][$index][0]);
+			if ($class === null) {
+				continue;
+			}
+			$after = $start + strlen($whole[0]);
+			if ($this->isNegated($text, $start)) {
+				if ($this->afterEarlyExit($text, $after, $offset)) {
+					$best = $class;
+					$bestStart = $start;
+				}
+				continue;
+			}
+			if ($this->insideGuardedBlock($text, $after, $offset) || $this->afterAssert($text, $start, $after, $offset)) {
+				$best = $class;
+				$bestStart = $start;
+			}
+		}
+		return $best;
+	}
+
+	/** @return string|null FQCN класса из индекса */
+	private function narrowedClass(PhpDocumentContext $context, string $name): ?string
+	{
+		foreach ($context->classCandidates(ltrim($name, '\\')) as $candidate) {
+			if ($this->repository->classByName($candidate) !== null) {
+				return $candidate;
+			}
+		}
+		return null;
+	}
+
+	/** `!$x instanceof Foo` / `!($x instanceof Foo)` — отрицание именно этой переменной. */
+	private function isNegated(string $text, int $start): bool
+	{
+		return str_contains(substr($text, max(0, $start - 2), min(2, $start)), '!');
+	}
+
+	/** Курсор внутри блока `if (… instanceof …) { … }`. */
+	private function insideGuardedBlock(string $text, int $after, int $offset): bool
+	{
+		$brace = strpos($text, '{', $after);
+		if ($brace === false) {
+			return false;
+		}
+		$semicolon = strpos($text, ';', $after);
+		if ($semicolon !== false && $semicolon < $brace) {
+			return false;
+		}
+		$close = $this->matchingBrace($text, $brace);
+		return $close > $brace && $offset > $brace && $offset < $close;
+	}
+
+	/** После `if (!$x instanceof Foo) { return; }` тип сужается до Foo. */
+	private function afterEarlyExit(string $text, int $after, int $offset): bool
+	{
+		$semicolon = strpos($text, ';', $after);
+		if ($semicolon === false) {
+			return false;
+		}
+		$brace = strpos($text, '{', $after);
+		if ($brace !== false && $brace < $semicolon) {
+			$close = $this->matchingBrace($text, $brace);
+			if ($close <= $brace || $offset <= $close) {
+				return false;
+			}
+			$block = substr($text, $brace, $close - $brace);
+			return preg_match('/\b(?:return|throw|continue|break)\b/', $block) === 1;
+		}
+		$statement = substr($text, $after, $semicolon - $after);
+		if (preg_match('/\b(?:return|throw|continue|break)\b/', $statement) !== 1) {
+			return false;
+		}
+		return $offset > $semicolon;
+	}
+
+	/** `assert($x instanceof Foo);` — сужение после оператора. */
+	private function afterAssert(string $text, int $start, int $after, int $offset): bool
+	{
+		$lineStart = strrpos(substr($text, 0, $start), "\n");
+		$from = $lineStart === false ? 0 : $lineStart;
+		$prefix = substr($text, $from, $start - $from);
+		if (preg_match('/\bassert\s*\(/', $prefix) !== 1) {
+			return false;
+		}
+		$semicolon = strpos($text, ';', $after);
+		return $semicolon !== false && $offset > $semicolon;
+	}
+
+	private function matchingBrace(string $text, int $open): int
+	{
+		$depth = 0;
+		$length = strlen($text);
+		for ($i = $open; $i < $length; $i++) {
+			if ($text[$i] === '{') {
+				$depth++;
+			} elseif ($text[$i] === '}') {
+				$depth--;
+				if ($depth === 0) {
+					return $i;
+				}
+			}
+		}
+		return $length;
 	}
 
 	/**

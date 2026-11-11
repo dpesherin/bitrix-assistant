@@ -85,7 +85,7 @@ final class Server
 		$typeInference = new PhpTypeInference($this->repository);
 		$methodResolver = new PhpMethodResolver($this->repository, $typeInference);
 		$this->phpCompletion = new PhpCompletionProvider($this->repository, $typeInference);
-		$this->phpHover = new PhpHoverProvider($this->repository, $methodResolver);
+		$this->phpHover = new PhpHoverProvider($this->repository, $methodResolver, $typeInference);
 		$this->phpDefinition = new PhpDefinitionProvider($this->repository, $methodResolver);
 		$this->phpReferences = new PhpReferenceProvider($this->repository, $methodResolver);
 		$this->phpFolding = new PhpFoldingProvider();
