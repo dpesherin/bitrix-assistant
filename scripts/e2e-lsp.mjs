@@ -1131,6 +1131,19 @@ check(
 	'PHP: documentHighlight попадает в строку курсора',
 );
 
+const foldingRequest = request('textDocument/foldingRange', { textDocument: { uri: methodUri } });
+send(foldingRequest);
+const foldingResult = await waitFor((message) => message.id === foldingRequest.id);
+const folding = Array.isArray(foldingResult.result) ? foldingResult.result : [];
+const classFold = folding.find((item) => item.startLine === 3 && item.endLine === 16);
+const methodFold = folding.find((item) => item.startLine === 5 && item.endLine === 15);
+check(Boolean(classFold), 'PHP: foldingRange сворачивает тело класса');
+check(Boolean(methodFold), 'PHP: foldingRange сворачивает тело метода');
+check(
+	folding.every((item) => item.endLine > item.startLine),
+	'PHP: foldingRange не отдаёт однострочные диапазоны',
+);
+
 const findCall = methodText.indexOf('self::find(');
 const signatureHelpRequest = request('textDocument/signatureHelp', {
 	textDocument: { uri: methodUri },

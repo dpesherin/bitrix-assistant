@@ -16,6 +16,7 @@ use BitrixLsp\Analyzer\LibraryCheck\LibraryQuickFix;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpCompletionProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpDefinitionProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpDiagnostics;
+use BitrixLsp\Analyzer\PhpAnalyzer\PhpFoldingProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpMethodResolver;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpReferenceProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpSemanticDiagnostics;
@@ -48,6 +49,7 @@ final class Server
 	private readonly PhpHoverProvider $phpHover;
 	private readonly PhpDefinitionProvider $phpDefinition;
 	private readonly PhpReferenceProvider $phpReferences;
+	private readonly PhpFoldingProvider $phpFolding;
 	private readonly PhpDiagnostics $phpDiagnostics;
 	private readonly PhpSignatureHelpProvider $phpSignatureHelp;
 	private readonly JsSignatureHelpProvider $jsSignatureHelp;
@@ -84,6 +86,7 @@ final class Server
 		$this->phpHover = new PhpHoverProvider($this->repository, $methodResolver);
 		$this->phpDefinition = new PhpDefinitionProvider($this->repository, $methodResolver);
 		$this->phpReferences = new PhpReferenceProvider($this->repository, $methodResolver);
+		$this->phpFolding = new PhpFoldingProvider();
 		$this->phpDiagnostics = new PhpDiagnostics(
 			$this->repository,
 			$this->config,
@@ -165,6 +168,9 @@ final class Server
 			case 'textDocument/documentHighlight':
 				$this->respond($id, $this->documentHighlight($params));
 				break;
+			case 'textDocument/foldingRange':
+				$this->respond($id, $this->foldingRange($params));
+				break;
 			case 'textDocument/signatureHelp':
 				$this->respond($id, $this->signatureHelp($params));
 				break;
@@ -206,6 +212,7 @@ final class Server
 				'definitionProvider' => true,
 				'referencesProvider' => true,
 				'documentHighlightProvider' => true,
+				'foldingRangeProvider' => true,
 				'signatureHelpProvider' => ['triggerCharacters' => ['(', ','], 'retriggerCharacters' => [',']],
 				'codeActionProvider' => ['codeActionKinds' => ['quickfix']],
 				'workspaceSymbolProvider' => true,
@@ -449,6 +456,21 @@ final class Server
 			$this->offset($document, $params),
 			(bool) ($context['includeDeclaration'] ?? true),
 		);
+	}
+
+	/**
+	 * Folding ranges: тела классов/функций, `#region`, блочные комментарии.
+	 *
+	 * @param array<string, mixed> $params
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function foldingRange(array $params): array
+	{
+		$document = $this->document($params);
+		if ($document === null) {
+			return [];
+		}
+		return $this->phpFolding->folding($document);
 	}
 
 	/**
