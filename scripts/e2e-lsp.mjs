@@ -1266,6 +1266,39 @@ check(
 	'PHP: typeDefinition учитывает сужение instanceof',
 );
 
+const hintText = [
+	'<?php',
+	'namespace Vendor\\Demo;',
+	'',
+	'test_helper(5);',
+	'test_helper(value: 5);',
+	'test_helper($missing);',
+	'',
+].join('\n');
+const hintUri = pathToFileURL(path.join(site, 'local/php_interface/inlay.php')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: hintUri, languageId: 'php', version: 1, text: hintText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === hintUri);
+
+const hintRequest = request('textDocument/inlayHint', {
+	textDocument: { uri: hintUri },
+	range: { start: { line: 0, character: 0 }, end: { line: 10, character: 0 } },
+});
+send(hintRequest);
+const hintResult = await waitFor((message) => message.id === hintRequest.id);
+const hints = Array.isArray(hintResult.result) ? hintResult.result : [];
+check(
+	hints.length === 2 && hints.every((hint) => hint.label === 'value: ' && hint.kind === 2),
+	'PHP: inlayHint подписывает аргументы, кроме именованных',
+);
+check(
+	hints[0]?.position?.line === 3 && hints[1]?.position?.line === 5,
+	'PHP: inlayHint приходит в позиции аргумента',
+);
+
 const foldingRequest = request('textDocument/foldingRange', { textDocument: { uri: methodUri } });
 send(foldingRequest);
 const foldingResult = await waitFor((message) => message.id === foldingRequest.id);

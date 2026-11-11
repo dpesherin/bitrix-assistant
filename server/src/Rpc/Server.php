@@ -17,6 +17,7 @@ use BitrixLsp\Analyzer\PhpAnalyzer\PhpCompletionProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpDefinitionProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpDiagnostics;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpFoldingProvider;
+use BitrixLsp\Analyzer\PhpAnalyzer\PhpInlayHintProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpMethodResolver;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpReferenceProvider;
 use BitrixLsp\Analyzer\PhpAnalyzer\PhpSemanticDiagnostics;
@@ -52,6 +53,7 @@ final class Server
 	private readonly PhpReferenceProvider $phpReferences;
 	private readonly PhpFoldingProvider $phpFolding;
 	private readonly PhpTypeNavigation $phpNavigation;
+	private readonly PhpInlayHintProvider $phpInlayHints;
 	private readonly PhpDiagnostics $phpDiagnostics;
 	private readonly PhpSignatureHelpProvider $phpSignatureHelp;
 	private readonly JsSignatureHelpProvider $jsSignatureHelp;
@@ -90,6 +92,7 @@ final class Server
 		$this->phpReferences = new PhpReferenceProvider($this->repository, $methodResolver);
 		$this->phpFolding = new PhpFoldingProvider();
 		$this->phpNavigation = new PhpTypeNavigation($this->repository, $methodResolver, $typeInference);
+		$this->phpInlayHints = new PhpInlayHintProvider($this->repository, $methodResolver);
 		$this->phpDiagnostics = new PhpDiagnostics(
 			$this->repository,
 			$this->config,
@@ -180,6 +183,9 @@ final class Server
 			case 'textDocument/foldingRange':
 				$this->respond($id, $this->foldingRange($params));
 				break;
+			case 'textDocument/inlayHint':
+				$this->respond($id, $this->inlayHint($params));
+				break;
 			case 'textDocument/signatureHelp':
 				$this->respond($id, $this->signatureHelp($params));
 				break;
@@ -224,6 +230,7 @@ final class Server
 				'referencesProvider' => true,
 				'documentHighlightProvider' => true,
 				'foldingRangeProvider' => true,
+				'inlayHintProvider' => true,
 				'signatureHelpProvider' => ['triggerCharacters' => ['(', ','], 'retriggerCharacters' => [',']],
 				'codeActionProvider' => ['codeActionKinds' => ['quickfix']],
 				'workspaceSymbolProvider' => true,
@@ -467,6 +474,22 @@ final class Server
 			$this->offset($document, $params),
 			(bool) ($context['includeDeclaration'] ?? true),
 		);
+	}
+
+	/**
+	 * Подсказки с именами параметров в вызовах.
+	 *
+	 * @param array<string, mixed> $params
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function inlayHint(array $params): array
+	{
+		$document = $this->document($params);
+		if ($document === null || $document->languageId !== 'php') {
+			return [];
+		}
+		$range = is_array($params['range'] ?? null) ? $params['range'] : [];
+		return $this->phpInlayHints->provide($document, $range);
 	}
 
 	/**
