@@ -28,6 +28,11 @@ final class HoverColor
 	 */
 	public static function sourceLine(string $file, ?int $line = null, bool $withDivider = true): string
 	{
+		if (str_starts_with($file, '<phpstub>')) {
+			// Встроенные символы PHP: файла нет, показываем пометку вместо пути.
+			$note = '<sub><span style="color:#8B949E;">Встроенный PHP</span></sub>';
+			return $withDivider ? "---\n\n" . $note : $note;
+		}
 		$location = str_replace('`', "'", $file . ($line !== null && $line > 0 ? ':' . $line : ''));
 		$line = '<sub><span style="color:#8B949E;">Определение:</span> `' . $location . '`</sub>';
 		return $withDivider ? "---\n\n" . $line : $line;

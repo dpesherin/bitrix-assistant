@@ -2,7 +2,7 @@
 	"name": "bitrix-assistant",
 	"displayName": "Bitrix Assistant",
 	"description": "Индекс ядра 1С-Битрикс, подсказки PHP и JS (LSP), SSH-синхронизация с сервером и терминал на сервере — без внешних сервисов и LLM",
-	"version": "0.3.8",
+	"version": "0.3.9",
 	"publisher": "pesherind",
 	"license": "MIT",
 	"engines": {
@@ -356,6 +356,11 @@
 					"default": false,
 					"scope": "resource",
 					"description": "Семантические предупреждения PHP: неизвестные функции/переменные, число и типы аргументов."
+				},
+				"bitrix.index.phpStubs": {
+					"type": "boolean",
+					"default": true,
+					"description": "Импортировать в индекс встроенные функции и классы PHP (stdlib): подсказки, hover и сигнатуры по ним. Данные генерируются из рантайма PHP 8.4."
 				}
 			}
 		},

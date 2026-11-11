@@ -179,6 +179,141 @@ export class IndexWriter {
 		});
 	}
 
+	/**
+	 * Импорт встроенных функций и классов PHP из `server/data/php-stubs.json`
+	 * (генерируется `scripts/build-php-stubs.php` из рантайма PHP 8.4).
+	 *
+	 * Строки помечаются псевдо-файлом `<phpstub>/…`, чтобы hover/переходы не
+	 * отправляли пользователя в несуществующий файл.
+	 */
+	writePhpStubs(stubsFile: string): number {
+		let payload: {
+			php?: string;
+			functions?: Array<Record<string, unknown>>;
+			classes?: Array<Record<string, unknown>>;
+		};
+		try {
+			payload = JSON.parse(fs.readFileSync(stubsFile, 'utf8')) as typeof payload;
+		} catch (err) {
+			this.onError(`php-stubs ${stubsFile}: ${err instanceof Error ? err.message : String(err)}`);
+			return 0;
+		}
+		const phpVersion = typeof payload.php === 'string' ? payload.php : '';
+		const functionsFile = '<phpstub>/functions.php';
+		const functions = Array.isArray(payload.functions) ? payload.functions : [];
+		const classes = Array.isArray(payload.classes) ? payload.classes : [];
+		let written = 0;
+		this.db.transaction(() => {
+			this.db.run("DELETE FROM php_functions WHERE file LIKE '<phpstub>%'");
+			this.db.run("DELETE FROM classes WHERE file LIKE '<phpstub>%'");
+			this.db.run("DELETE FROM methods WHERE file LIKE '<phpstub>%'");
+			this.db.run("DELETE FROM properties WHERE file LIKE '<phpstub>%'");
+			this.db.run("DELETE FROM constants WHERE file LIKE '<phpstub>%'");
+			for (const fn of functions) {
+				const name = String(fn.name ?? '');
+				if (name === '') {
+					continue;
+				}
+				this.db.run(
+					`INSERT INTO php_functions
+						(name, namespace, fqcn, signature, return_type, params_json, doc, deprecated, file, line)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					name,
+					null,
+					name,
+					String(fn.signature ?? name),
+					typeof fn.returnType === 'string' ? fn.returnType : null,
+					JSON.stringify(fn.params ?? []),
+					phpVersion !== '' ? `Встроенная функция PHP ${phpVersion}.` : 'Встроенная функция PHP.',
+					Number(fn.deprecated ?? 0) === 1 ? 1 : 0,
+					functionsFile,
+					0,
+				);
+				written++;
+			}
+			for (const entry of classes) {
+				const fqcn = String(entry.fqcn ?? '');
+				if (fqcn === '') {
+					continue;
+				}
+				const file = `<phpstub>/${fqcn.replace(/\\/g, '/')}.php`;
+				const parts = fqcn.split('\\');
+				const short = parts.pop() ?? fqcn;
+				this.db.run(
+					`INSERT INTO classes
+						(fqcn, name, namespace, kind, module, file, line, extends, implements, is_abstract, is_final,
+						 is_orm, deprecated, traits_json, doc)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					fqcn,
+					short,
+					parts.join('\\') || null,
+					String(entry.kind ?? 'class'),
+					null,
+					file,
+					0,
+					typeof entry.extends === 'string' ? entry.extends : null,
+					null,
+					Number(entry.abstract ?? 0) === 1 ? 1 : 0,
+					Number(entry.final ?? 0) === 1 ? 1 : 0,
+					0,
+					0,
+					'[]',
+					phpVersion !== '' ? `Встроенный ${String(entry.kind ?? 'class')} PHP ${phpVersion}.` : null,
+				);
+				for (const method of Array.isArray(entry.methods) ? entry.methods : []) {
+					this.db.run(
+						`INSERT INTO methods
+							(class_fqcn, name, signature, return_type, params_json, is_static, visibility,
+							 is_abstract, deprecated, doc, file, line)
+						 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+						fqcn,
+						String(method.name ?? ''),
+						String(method.signature ?? ''),
+						typeof method.returnType === 'string' ? method.returnType : null,
+						JSON.stringify(method.params ?? []),
+						Number(method.static ?? 0) === 1 ? 1 : 0,
+						String(method.visibility ?? 'public'),
+						Number(method.abstract ?? 0) === 1 ? 1 : 0,
+						Number(method.deprecated ?? 0) === 1 ? 1 : 0,
+						null,
+						file,
+						0,
+					);
+				}
+				for (const property of Array.isArray(entry.properties) ? entry.properties : []) {
+					this.db.run(
+						`INSERT INTO properties
+							(class_fqcn, name, type, visibility, is_static, default_value, doc, file, line)
+						 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+						fqcn,
+						String(property.name ?? ''),
+						typeof property.type === 'string' ? property.type : null,
+						String(property.visibility ?? 'public'),
+						Number(property.static ?? 0) === 1 ? 1 : 0,
+						null,
+						null,
+						file,
+						0,
+					);
+				}
+				for (const constant of Array.isArray(entry.constants) ? entry.constants : []) {
+					this.db.run(
+						`INSERT INTO constants (class_fqcn, name, type, value, doc, file, line)
+						 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+						fqcn,
+						String(constant.name ?? ''),
+						null,
+						typeof constant.value === 'string' ? constant.value : null,
+						null,
+						file,
+						0,
+					);
+				}
+			}
+		});
+		return written;
+	}
+
 	writePhpFile(file: string): void {
 		let content: string;
 		try {

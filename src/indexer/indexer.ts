@@ -490,6 +490,13 @@ export class BitrixIndexer implements vscode.Disposable {
 				);
 
 		writer.indexModules(layout.bitrixDir, layout.localDir);
+		if (settings.indexPhpStubs) {
+			const stubsFile = path.join(this.context.extensionPath, 'server', 'data', 'php-stubs.json');
+			if (fs.existsSync(stubsFile)) {
+				const count = writer.writePhpStubs(stubsFile);
+				log().debug(`php-stubs: импортировано ${count} встроенных функций PHP`);
+			}
+		}
 
 		const phpFiles: string[] = [];
 		await this.collectPhpFiles(layout, excludes, token, phpFiles);

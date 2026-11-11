@@ -32,7 +32,8 @@ final class PhpDefinitionProvider
 		}
 		$reference = $this->resolver->resolve($document, $offset);
 		if ($reference !== null) {
-			return [$this->location((string) $reference['method']['file'], (int) $reference['method']['line'])];
+			$file = (string) $reference['method']['file'];
+			return $this->isStub($file) ? [] : [$this->location($file, (int) $reference['method']['line'])];
 		}
 
 		$target = $this->resolver->resolveMemberTarget($document, $offset);
@@ -44,7 +45,8 @@ final class PhpDefinitionProvider
 				$row = $this->repository->findConstantInHierarchy($target['class'], $target['token']['name']);
 			}
 			if ($row !== null) {
-				return [$this->location((string) $row['file'], (int) $row['line'])];
+				$file = (string) $row['file'];
+				return $this->isStub($file) ? [] : [$this->location($file, (int) $row['line'])];
 			}
 		}
 
@@ -62,15 +64,18 @@ final class PhpDefinitionProvider
 			if ($class === null) {
 				continue;
 			}
-			return [$this->location((string) $class['file'], (int) $class['line'])];
+			$file = (string) $class['file'];
+			return $this->isStub($file) ? [] : [$this->location($file, (int) $class['line'])];
 		}
 		$function = $this->repository->findFunction($token['name']);
 		if ($function !== null) {
-			return [$this->location((string) $function['file'], (int) $function['line'])];
+			$file = (string) $function['file'];
+			return $this->isStub($file) ? [] : [$this->location($file, (int) $function['line'])];
 		}
 		$constant = $this->repository->findGlobalConstant($token['name']);
 		if ($constant !== null) {
-			return [$this->location((string) $constant['file'], (int) $constant['line'])];
+			$file = (string) $constant['file'];
+			return $this->isStub($file) ? [] : [$this->location($file, (int) $constant['line'])];
 		}
 		return [];
 	}
@@ -78,6 +83,12 @@ final class PhpDefinitionProvider
 	/**
 	 * @return array<string, mixed>
 	 */
+	/** Встроенные символы PHP из стабов: файла нет, переходить некуда. */
+	private function isStub(string $file): bool
+	{
+		return str_starts_with($file, '<phpstub>');
+	}
+
 	private function location(string $file, int $line): array
 	{
 		$zeroBased = max(0, $line - 1);

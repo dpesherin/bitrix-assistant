@@ -24,6 +24,9 @@ mkdir -p server/bin
 echo "==> Сборка server/bin/bitrix-lsp.phar"
 "$PHP_BIN" -d phar.readonly=0 scripts/build-phar.php
 
+echo "==> Стабы встроенного PHP (server/data/php-stubs.json)"
+"$PHP_BIN" scripts/build-php-stubs.php
+
 PLATFORM="$("${NODE_BIN:-node}" -p "process.platform + '-' + process.arch")"
 case "$PLATFORM" in
   win32-x64) BINARY_NAME="php-win32-x64.exe" ;;
