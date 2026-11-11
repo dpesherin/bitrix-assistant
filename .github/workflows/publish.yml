@@ -116,6 +116,9 @@ jobs:
             rm -f server/bin/php-*
             cp "$stash/$keep" server/bin/
             echo "==> $target ($keep)"
-            npx --yes @vscode/vsce publish --oidc --target "$target" "$version" \
-              --no-git-tag-version --no-update-package-json
+            # Версия идёт до --target: у --target вариативный список значений,
+            # иначе он съедает версию как ещё один таргет («0.3.2 is not a valid
+            # VS Code target»). --skip-duplicate делает повторный прогон идемпотентным.
+            npx --yes @vscode/vsce publish "$version" --oidc --target "$target" \
+              --no-git-tag-version --no-update-package-json --skip-duplicate
           done
