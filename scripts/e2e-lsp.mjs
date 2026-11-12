@@ -674,6 +674,71 @@ insertGlobal(
 	path.join(site, 'local/php_interface/functions.php'),
 	20,
 );
+// Регистр в имени метода и union-тип возврата: родитель и потомок.
+const legacyCaseFile = path.join(site, 'bitrix/modules/main/classes/general/case_demo.php');
+mkdirSync(path.dirname(legacyCaseFile), { recursive: true });
+writeFileSync(legacyCaseFile, [
+	'<?php',
+	'class CaseDemo',
+	'{',
+	'    public function GetID()',
+	'    {',
+	'        return 1;',
+	'    }',
+	'}',
+	'',
+].join('\n'));
+const unionBaseFile = path.join(site, 'bitrix/modules/main/lib/union_base.php');
+const unionChildFile = path.join(site, 'bitrix/modules/main/lib/union_child.php');
+const unionContextFile = path.join(site, 'bitrix/modules/main/lib/union_context.php');
+mkdirSync(path.dirname(unionBaseFile), { recursive: true });
+writeFileSync(unionBaseFile, ['<?php', 'namespace Vendor\\Union;', '', 'abstract class Base', '{', '}', ''].join('\n'));
+writeFileSync(unionChildFile, ['<?php', 'namespace Vendor\\Union;', '', 'class Child extends Base', '{', '    public function onlyChild(): void', '    {', '    }', '}', ''].join('\n'));
+writeFileSync(unionContextFile, [
+	'<?php',
+	'namespace Vendor\\Union;',
+	'',
+	'class Context',
+	'{',
+	'    /**',
+	'     * @return Base | Child',
+	'     */',
+	'    public function getRequest()',
+	'    {',
+	'        return null;',
+	'    }',
+	'}',
+	'',
+].join('\n'));
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line) VALUES (?,?,?,?,?,?,?)',
+	'CaseDemo', 'CaseDemo', '', 'class', 'main', legacyCaseFile, 2,
+);
+insertGlobal(
+	'INSERT INTO methods (class_fqcn, name, signature, return_type, params_json, is_static, visibility, file, line, doc) VALUES (?,?,?,?,?,?,?,?,?,?)',
+	'CaseDemo', 'GetID', 'GetID()', '', '[]', 0, 'public', legacyCaseFile, 4, '',
+);
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line) VALUES (?,?,?,?,?,?,?)',
+	'Vendor\\Union\\Base', 'Base', 'Vendor\\Union', 'class', 'main', unionBaseFile, 4,
+);
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line, extends) VALUES (?,?,?,?,?,?,?,?)',
+	'Vendor\\Union\\Child', 'Child', 'Vendor\\Union', 'class', 'main', unionChildFile, 4, 'Vendor\\Union\\Base',
+);
+insertGlobal(
+	'INSERT INTO methods (class_fqcn, name, signature, return_type, params_json, is_static, visibility, file, line, doc) VALUES (?,?,?,?,?,?,?,?,?,?)',
+	'Vendor\\Union\\Child', 'onlyChild', 'onlyChild(): void', 'void', '[]', 0, 'public', unionChildFile, 6, '',
+);
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line) VALUES (?,?,?,?,?,?,?)',
+	'Vendor\\Union\\Context', 'Context', 'Vendor\\Union', 'class', 'main', unionContextFile, 4,
+);
+insertGlobal(
+	'INSERT INTO methods (class_fqcn, name, signature, return_type, params_json, is_static, visibility, file, line, doc) VALUES (?,?,?,?,?,?,?,?,?,?)',
+	'Vendor\\Union\\Context', 'getRequest', 'getRequest()', 'Base | Child', '[]', 0, 'public', unionContextFile, 9,
+	"/**\n * @return Base | Child\n */",
+);
 // ORM-алиасы: `@return QueryResult` в файле с `use Result as QueryResult`.
 const ormResultFile = path.join(site, 'bitrix/modules/main/lib/orm/query/result.php');
 mkdirSync(path.dirname(ormResultFile), { recursive: true });
@@ -2568,6 +2633,32 @@ const ormFetch = await waitFor((message) => message.id === ormFetchRequest.id);
 check(
 	Array.isArray(ormFetch.result) && ormFetch.result[0]?.uri?.endsWith('/orm/query/result.php'),
 	'PHP: definition fetch() в цепочке ORM → Result',
+);
+
+const legacyUri = pathToFileURL(path.join(site, 'local/php_interface/legacy_case.php')).toString();
+const legacyText = [
+	'<?php',
+	'namespace Vendor\\Demo;',
+	'',
+	'$id = CaseDemo::GetId();',
+	'$request = \\Vendor\\Union\\Context::getRequest();',
+	'$request->onlyChild();',
+	'',
+].join('\n');
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: legacyUri, languageId: 'php', version: 1, text: legacyText } },
+});
+const legacyDiagnostics = await waitFor(
+	(message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === legacyUri,
+);
+const legacyCodes = (legacyDiagnostics?.params?.diagnostics ?? [])
+	.filter((item) => item.code === 'bitrix.php.unknown-method')
+	.map((item) => String(item.message));
+check(
+	legacyCodes.length === 0,
+	`PHP: регистр метода и union-тип возврата не дают ложных предупреждений (${legacyCodes.join('; ')})`,
 );
 
 send(request('shutdown', {}));

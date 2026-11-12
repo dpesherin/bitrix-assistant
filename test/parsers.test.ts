@@ -8,6 +8,35 @@ import { buildUseEdit } from '../src/features/phpUseEdit';
 import { parseParametersPhp, componentLocation } from '../src/indexer/php/componentParser';
 import { parsePhpArrayLiteralForTest } from './helpers';
 
+test('PHP: union-тип из @return сохраняется целиком', () => {
+	const php = `<?php
+namespace Vendor\\Demo;
+abstract class Request
+{
+}
+class HttpRequest extends Request
+{
+	public function getList()
+	{
+		return [];
+	}
+}
+class Context
+{
+	/**
+	 * @return Request | HttpRequest
+	 */
+	public function getRequest()
+	{
+		return null;
+	}
+}`;
+	const parsed = parsePhpFile(php);
+	const context = parsed.classes.find((item) => item.name === 'Context');
+	const method = context?.methods.find((item) => item.name === 'getRequest');
+	assert.equal(method?.returnType, 'Request | HttpRequest');
+});
+
 test('PHP: трейты и родители резолвятся через use-импорты', () => {
 	const php = `<?php
 namespace Vendor\\Biconnector;

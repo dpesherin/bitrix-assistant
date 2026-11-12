@@ -416,7 +416,7 @@ function parseClassMembers(
 		}
 		const modifiers = match[1] ?? '';
 		const doc = findDocblock(docblocks, abs, masked);
-		const docType = doc ? /@var\s+([^\s*]+)/.exec(doc.text)?.[1] : undefined;
+		const docType = docblockType(doc?.text, 'var');
 		const equals = match[0].indexOf('=');
 		const defaultValue =
 			equals === -1
@@ -492,6 +492,53 @@ function splitParams(original: string, masked: string, from: number, to: number)
 		parts.push(tail);
 	}
 	return parts;
+}
+
+/** Читает тип из начала строки: `Foo`, `?Foo`, `Foo|Bar`, `Foo | Bar`, `array<Foo>`. */
+function readType(text: string): string | undefined {
+	let out = '';
+	let i = 0;
+	const isTypeChar = (ch: string): boolean => /[A-Za-z0-9_\\?|&<>[\](),.]/.test(ch);
+	while (i < text.length) {
+		const ch = text[i];
+		if (isTypeChar(ch)) {
+			out += ch;
+			i += 1;
+			continue;
+		}
+		if (ch === ' ' || ch === '\t') {
+			// Пробел допустим только внутри union: `Request | HttpRequest`.
+			let j = i;
+			while (j < text.length && (text[j] === ' ' || text[j] === '\t')) {
+				j += 1;
+			}
+			const last = out[out.length - 1];
+			if (text[j] === '|' || text[j] === '&' || last === '|' || last === '&') {
+				out += ' ';
+				i = j;
+				continue;
+			}
+		}
+		break;
+	}
+	const result = out.trim();
+	return result === '' ? undefined : result;
+}
+
+/** Тип из `@var`/`@return` в докблоке, включая union с пробелами. */
+function docblockType(doc: string | undefined, tag: 'var' | 'return'): string | undefined {
+	if (!doc) {
+		return undefined;
+	}
+	const clean = doc
+		.replace(/\/\*\*?/g, ' ')
+		.replace(/\*\//g, ' ')
+		.replace(/^\s*\*\s?/gm, '');
+	const match = new RegExp(`@${tag}\\s+([^\\n]+)`).exec(clean);
+	if (!match) {
+		return undefined;
+	}
+	return readType(match[1]);
 }
 
 function parseParam(raw: string): ParsedParam | undefined {
@@ -599,7 +646,7 @@ function parseTopLevelFunctions(
 			.filter((param): param is ParsedParam => Boolean(param));
 		const returnMatch = /^\s*:\s*([A-Za-z0-9_\\?|]+)/.exec(masked.slice(closeParen + 1, closeParen + 120));
 		const doc = findDocblock(docblocks, m.index, masked);
-		const docReturn = doc ? /@return\s+([^\s*]+)/.exec(doc.text)?.[1] : undefined;
+		const docReturn = docblockType(doc?.text, 'return');
 		const returnType = returnMatch ? returnMatch[1] : docReturn;
 		const deprecatedLine = doc?.text.split('\n').find((line) => /^@deprecated\b/.test(line));
 		const signatureBody = paramsText.replace(/\s+/g, ' ').trim();
@@ -717,7 +764,7 @@ export function parsePhpFile(content: string): ParsedPhpFile {
 				.filter((param): param is ParsedParam => Boolean(param));
 			const returnMatch = /^\s*:\s*([A-Za-z0-9_\\?|]+)/.exec(masked.slice(closeParen + 1, closeParen + 120));
 			const fnDoc = findDocblock(docblocks, fn.index, masked);
-			const docReturn = fnDoc ? /@return\s+([^\s*]+)/.exec(fnDoc.text)?.[1] : undefined;
+			const docReturn = docblockType(fnDoc?.text, 'return');
 			const returnType = returnMatch ? returnMatch[1] : docReturn;
 			const deprecatedLine = fnDoc?.text.split('\n').find((line) => /^@deprecated\b/.test(line));
 			const visibility = /\bprivate\b/.test(mods)

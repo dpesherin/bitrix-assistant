@@ -458,7 +458,7 @@ final class Repository
 		return $this->row(
 			'SELECT class_fqcn, name, signature, return_type, params_json, is_static, visibility, '
 			. 'is_abstract, deprecated, doc, file, line '
-			. 'FROM methods WHERE class_fqcn = ? AND name = ? LIMIT 1',
+			. 'FROM methods WHERE class_fqcn = ? AND name = ? COLLATE NOCASE LIMIT 1',
 			[ltrim($fqcn, '\\'), $name],
 		);
 	}

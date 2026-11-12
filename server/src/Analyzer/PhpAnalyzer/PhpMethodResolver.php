@@ -182,11 +182,34 @@ final class PhpMethodResolver
 		if (!str_starts_with($receiver, '$')) {
 			return null;
 		}
+		$candidates = [];
 		foreach ($this->inference->variableCandidates($context, $receiver, $offset) as $candidate) {
 			if ($this->repository->classByName($candidate) !== null) {
-				return $candidate;
+				$candidates[] = $candidate;
 			}
 		}
-		return null;
+		if ($candidates === []) {
+			return null;
+		}
+		// Объявленный тип бывает объединением (`@return Parent | Child`).
+		// Метод обычно объявлен у потомка, поэтому из пары «родитель и потомок»
+		// берём потомка: иначе `getPostList()` у `Request` не находится.
+		if (count($candidates) > 1) {
+			$specific = array_values(array_filter(
+				$candidates,
+				function (string $candidate) use ($candidates): bool {
+					foreach ($candidates as $other) {
+						if (strcasecmp($candidate, $other) !== 0 && $this->repository->classIsA($other, $candidate)) {
+							return false; // candidate — предок other
+						}
+					}
+					return true;
+				},
+			));
+			if ($specific !== []) {
+				$candidates = $specific;
+			}
+		}
+		return $candidates[0];
 	}
 }
