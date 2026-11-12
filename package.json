@@ -2,7 +2,7 @@
 	"name": "bitrix-assistant",
 	"displayName": "Bitrix Assistant",
 	"description": "Индекс ядра 1С-Битрикс, подсказки PHP и JS (LSP), SSH-синхронизация с сервером и терминал на сервере — без внешних сервисов и LLM",
-	"version": "0.4.8",
+	"version": "0.4.9",
 	"publisher": "pesherind",
 	"license": "MIT",
 	"engines": {
@@ -393,6 +393,11 @@
 						"d"
 					],
 					"description": "Имена функций и методов, которые не проверять на существование (например внешние хелперы вроде d)."
+				},
+				"bitrix.diagnostics.projectScan": {
+					"type": "boolean",
+					"default": true,
+					"description": "После индексации проверять весь проект (в пределах лимита) и показывать диагностику в Problems для всех файлов, а не только для открытых."
 				}
 			}
 		},

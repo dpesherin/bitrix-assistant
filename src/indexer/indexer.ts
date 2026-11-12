@@ -6,6 +6,7 @@ import { log, errorMessage } from '../log';
 import { readSettings } from '../settings';
 import { isExcluded, toPosix } from '../util/glob';
 import { Database } from './db';
+import { PARSER_VERSION } from './schema';
 import { IndexWriter } from './indexWriter';
 
 export interface ClassCompletionRow {
@@ -491,6 +492,18 @@ export class BitrixIndexer implements vscode.Disposable {
 			report('Каталог bitrix не найден — индексация пропущена.');
 			return;
 		}
+		// Обновилось расширение и изменился разбор — старые строки в индексе
+		// устарели: пересобираем целиком, иначе исправления не применятся.
+		if (!force) {
+			const stored = Number(
+				db.all<{ value: string }>("SELECT value FROM meta WHERE key = 'parser_version' LIMIT 1")[0]?.value ?? 0,
+			);
+			if (stored !== PARSER_VERSION) {
+				log().info(`Версия индексатора изменилась (${stored} → ${PARSER_VERSION}) — полная переиндексация`);
+				report('Версия индексатора изменилась — пересобираю индекс полностью.');
+				force = true;
+			}
+		}
 		const excludes = settings.indexExclude;
 		const writer = new IndexWriter(db, (message) => log().debug(message));
 		const seen = new Set<string>();
@@ -578,6 +591,7 @@ export class BitrixIndexer implements vscode.Disposable {
 			}
 			writer.refreshDeprecated();
 			db.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', 'indexed_at', String(Date.now()));
+			db.run('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)', 'parser_version', String(PARSER_VERSION));
 		}
 		report('Индекс готов.');
 	}

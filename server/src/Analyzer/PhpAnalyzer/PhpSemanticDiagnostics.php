@@ -332,11 +332,19 @@ final class PhpSemanticDiagnostics
 		if ($row !== null && strtolower((string) ($row['kind'] ?? '')) === 'interface') {
 			return null;
 		}
-		// Динамическая диспетчеризация: `$runtime->GetService('DocumentService')->Foo()`
-		// — тип зависит от строкового аргумента, проверить нельзя.
+		// Динамическая диспетчеризация: тип зависит от строкового аргумента —
+		// `$runtime->GetService('DocumentService')->Foo()` или через переменную
+		// `$service = $runtime->GetService('DocumentService'); $service->Foo()`.
 		$beforeCall = substr($document->text, max(0, $nameOffset - 240), min(240, $nameOffset));
 		if (preg_match('/(?:->|::)\s*[A-Za-z_][A-Za-z0-9_]*\s*\(\s*[\'"]/', $beforeCall) === 1) {
 			return null;
+		}
+		if (preg_match('/(\$[A-Za-z_][A-Za-z0-9_]*)\s*->\s*$/', $beforeCall, $receiverVar) === 1) {
+			$variable = preg_quote($receiverVar[1], '/');
+			$whole = substr($document->text, max(0, $nameOffset - 4000), min(4000, $nameOffset));
+			if (preg_match('/' . $variable . '\s*=\s*[^;]*\b[A-Za-z_][A-Za-z0-9_]*\s*\(\s*[\'"]/', $whole) === 1) {
+				return null;
+			}
 		}
 		$magic = $target['operator'] === '::' ? '__callStatic' : '__call';
 		if (
@@ -929,6 +937,16 @@ final class PhpSemanticDiagnostics
 			}
 		}
 		if (preg_match_all('/\bfunction\s*[^()]*\(([^)]*)\)/i', $masked, $matches) > 0) {
+			foreach ($matches[1] as $body) {
+				if (preg_match_all('/\$([A-Za-z_][A-Za-z0-9_]*)/', $body, $vars) > 0) {
+					foreach ($vars[1] as $name) {
+						$declared[$name] = true;
+					}
+				}
+			}
+		}
+		// Деструктуризация: `[$a, $b] = ...` (короткая форма list()).
+		if (preg_match_all('/\[\s*([^\]]*?)\s*\]\s*=/', $masked, $matches) > 0) {
 			foreach ($matches[1] as $body) {
 				if (preg_match_all('/\$([A-Za-z_][A-Za-z0-9_]*)/', $body, $vars) > 0) {
 					foreach ($vars[1] as $name) {

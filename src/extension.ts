@@ -213,6 +213,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Active
 				statusBar.setIndexing(false);
 				indexView.refresh();
 				lsp.refreshDiagnostics();
+				// Problems по всему проекту: LSP иначе присылает диагностику
+				// только для открытых файлов, и после перезагрузки окна она пуста.
+				void runProjectScan(ext);
 			})
 			.catch((err) => {
 				statusBar.setIndexing(false);
@@ -1197,6 +1200,24 @@ async function showMenu(ext: ActiveExtension): Promise<void> {
 	}
 }
 
+/**
+ * Проверка всего проекта после индексации (настройка bitrix.diagnostics.projectScan).
+ * Ошибки не показываем: если LSP не поднялся, диагностика придёт по открытым файлам.
+ */
+async function runProjectScan(ext: ActiveExtension): Promise<void> {
+	const config = vscode.workspace.getConfiguration('bitrix');
+	if (!config.get<boolean>('diagnostics.projectScan', true)) {
+		return;
+	}
+	const limit = config.get<number>('diagnostics.projectLimit', 500);
+	try {
+		const result = await ext.lsp.diagnoseAll(limit);
+		log().info(`Проверка проекта: файлов ${result.files}, диагностик ${result.diagnostics}`);
+	} catch (err) {
+		log().debug(`Проверка проекта пропущена: ${errorMessage(err)}`);
+	}
+}
+
 async function runIndexCommand(ext: ActiveExtension, full: boolean): Promise<void> {
 	await vscode.window.withProgress(
 		{
@@ -1217,6 +1238,7 @@ async function runIndexCommand(ext: ActiveExtension, full: boolean): Promise<voi
 				}
 				ext.indexView.refresh();
 				ext.lsp.refreshDiagnostics();
+				void runProjectScan(ext);
 						const stats = await ext.indexer.stats();
 				if (stats) {
 					void vscode.window.showInformationMessage(

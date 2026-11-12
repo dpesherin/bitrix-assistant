@@ -204,14 +204,19 @@ export class BitrixLanguageClient implements vscode.Disposable {
 	 * и публикует результаты, поэтому они появляются в Problems.
 	 */
 	async diagnoseAll(limit: number): Promise<{ files: number; diagnostics: number; truncated: boolean }> {
-		const client = this.client;
-		if (!client || client.state !== State.Running) {
-			throw new Error('LSP-сервер не запущен');
+		// Сканирование запускается сразу после индексации, а LSP стартует
+		// параллельно — ждём его до 10 секунд.
+		for (let attempt = 0; attempt < 20; attempt++) {
+			const client = this.client;
+			if (client && client.state === State.Running) {
+				return await client.sendRequest<{ files: number; diagnostics: number; truncated: boolean }>(
+					'workspace/diagnoseAll',
+					{ limit },
+				);
+			}
+			await new Promise((resolve) => setTimeout(resolve, 500));
 		}
-		return await client.sendRequest<{ files: number; diagnostics: number; truncated: boolean }>(
-			'workspace/diagnoseAll',
-			{ limit },
-		);
+		throw new Error('LSP-сервер не запущен');
 	}
 
 	refreshDiagnostics(): void {
