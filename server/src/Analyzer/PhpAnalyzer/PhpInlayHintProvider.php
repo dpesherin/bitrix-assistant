@@ -63,7 +63,7 @@ final class PhpInlayHintProvider
 			if (!is_array($params) || $params === []) {
 				continue;
 			}
-			foreach ($this->splitArguments($masked, $open + 1, $close) as $index => [$argStart, $argEnd]) {
+			foreach ($this->splitArguments($masked, $document->text, $open + 1, $close) as $index => [$argStart, $argEnd]) {
 				if (count($hints) >= self::MAX_HINTS) {
 					return $hints;
 				}
@@ -83,9 +83,9 @@ final class PhpInlayHintProvider
 				if ($name === '' || preg_match('/^_\d+$/', $name) === 1) {
 					continue; // сгенерированные имена из стабов (`$_1189783644`) — шум
 				}
-				if ($this->argumentRepeatsName($arg, $name)) {
-					continue;
-				}
+				// Подсказку показываем для КАЖДОГО аргумента, даже если он назван
+				// как параметр (`$this->id` для `$id`): иначе часть подписей
+				// пропадает и по коду трудно понять, что есть что.
 				$hints[$argStart] = [
 					'position' => $document->positionAt($argStart),
 					'label' => $name . ': ',
@@ -100,17 +100,6 @@ final class PhpInlayHintProvider
 		}
 		ksort($hints);
 		return array_values($hints);
-	}
-
-	/** Комбинация аргумента и параметра может совпадать — такую подсказку не показываем. */
-	private function argumentRepeatsName(string $argument, string $name): bool
-	{
-		$trimmed = trim($argument);
-		if ('$' . $name === $trimmed) {
-			return true;
-		}
-		// `$this->value` / `$item->name` для параметра `$value`/`$name` — тоже очевидно
-		return preg_match('/^(?:\\$this|\\$[A-Za-z_][A-Za-z0-9_]*)\\s*(?:->|::)\\s*\\$?' . preg_quote($name, '/') . '$/', $trimmed) === 1;
 	}
 
 	private function isNamedArgument(string $argument): bool
@@ -220,15 +209,20 @@ final class PhpInlayHintProvider
 	}
 
 	/**
+	 * Границы аргументов: структура (`(`, `[`, запятые) — по маске, чтобы запятые
+	 * внутри строк не делили вызов, а сами границы — по исходному тексту.
+	 * Иначе строковый литерал в маске превращается в пробелы, обрезается как
+	 * отступ, и подсказка параметра встаёт ПОСЛЕ аргумента.
+	 *
 	 * @return array<int, array{0: int, 1: int}> [начало, конец] каждого аргумента
 	 */
-	private function splitArguments(string $text, int $start, int $end): array
+	private function splitArguments(string $masked, string $raw, int $start, int $end): array
 	{
 		$parts = [];
 		$depth = 0;
 		$argumentStart = $start;
 		for ($i = $start; $i < $end; $i++) {
-			$ch = $text[$i];
+			$ch = $masked[$i];
 			if ($ch === '(' || $ch === '[' || $ch === '{') {
 				$depth++;
 				continue;
@@ -242,15 +236,15 @@ final class PhpInlayHintProvider
 				$argumentStart = $i + 1;
 			}
 		}
-		if (trim(substr($text, $argumentStart, $end - $argumentStart)) !== '') {
+		if (trim(substr($masked, $argumentStart, $end - $argumentStart)) !== '') {
 			$parts[] = [$argumentStart, $end];
 		}
 		$result = [];
 		foreach ($parts as [$from, $to]) {
-			while ($from < $to && ctype_space($text[$from])) {
+			while ($from < $to && ctype_space($raw[$from])) {
 				$from++;
 			}
-			while ($to > $from && ctype_space($text[$to - 1])) {
+			while ($to > $from && ctype_space($raw[$to - 1])) {
 				$to--;
 			}
 			$result[] = [$from, $to];

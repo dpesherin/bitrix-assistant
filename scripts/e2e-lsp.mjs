@@ -657,6 +657,23 @@ insertGlobal(
 	membersPath,
 	6,
 );
+insertGlobal(
+	'INSERT INTO php_functions (name, namespace, fqcn, signature, return_type, params_json, doc, deprecated, file, line) VALUES (?,?,?,?,?,?,?,?,?,?)',
+	'run_limit',
+	'',
+	'run_limit',
+	'run_limit(string $scope, int $id, callable $request): array',
+	'array',
+	JSON.stringify([
+		{ name: 'scope', type: 'string', variadic: false, byRef: false },
+		{ name: 'id', type: 'int', variadic: false, byRef: false },
+		{ name: 'request', type: 'callable', variadic: false, byRef: false },
+	]),
+	'',
+	0,
+	path.join(site, 'local/php_interface/functions.php'),
+	20,
+);
 // ORM-алиасы: `@return QueryResult` в файле с `use Result as QueryResult`.
 const ormResultFile = path.join(site, 'bitrix/modules/main/lib/orm/query/result.php');
 mkdirSync(path.dirname(ormResultFile), { recursive: true });
@@ -1384,6 +1401,78 @@ send({
 	params: { textDocument: { uri: hintUri, languageId: 'php', version: 1, text: hintText } },
 });
 await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === hintUri);
+
+const hintArgsText = [
+	'<?php',
+	'namespace Vendor\\Demo;',
+	'',
+	"run_limit('company', $userId, function (): array {",
+	'    return [];',
+	'});',
+	'',
+].join('\n');
+const hintArgsUri = pathToFileURL(path.join(site, 'local/php_interface/inlay_args.php')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: hintArgsUri, languageId: 'php', version: 1, text: hintArgsText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === hintArgsUri);
+const hintArgsRequest = request('textDocument/inlayHint', {
+	textDocument: { uri: hintArgsUri },
+	range: { start: { line: 0, character: 0 }, end: { line: 10, character: 0 } },
+});
+send(hintArgsRequest);
+const hintArgs = await waitFor((message) => message.id === hintArgsRequest.id);
+const argHints = Array.isArray(hintArgs.result) ? hintArgs.result : [];
+const callLine = hintArgsText.split('\n')[3];
+const positions = argHints.map((hint) => `${hint.label}@${hint.position.character}`);
+check(
+	argHints.length === 3 &&
+		argHints[0]?.position?.character === callLine.indexOf("'company'") &&
+		argHints[1]?.position?.character === callLine.indexOf('$userId') &&
+		argHints[2]?.position?.character === callLine.indexOf('function'),
+	`PHP: inlayHint ставится ПЕРЕД аргументом (${positions.join(', ')})`,
+);
+
+const hintThisText = [
+	'<?php',
+	'namespace Vendor\\Demo;',
+	'',
+	'class HintThis',
+	'{',
+	'    private int $id = 1;',
+	'',
+	'    public function run(): void',
+	'    {',
+	"        run_limit('company', $this->id, function (): array {",
+	'            return [];',
+	'        });',
+	'    }',
+	'}',
+	'',
+].join('\n');
+const hintThisUri = pathToFileURL(path.join(site, 'local/php_interface/inlay_this.php')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: hintThisUri, languageId: 'php', version: 1, text: hintThisText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === hintThisUri);
+const hintThisRequest = request('textDocument/inlayHint', {
+	textDocument: { uri: hintThisUri },
+	range: { start: { line: 0, character: 0 }, end: { line: 20, character: 0 } },
+});
+send(hintThisRequest);
+const hintThis = await waitFor((message) => message.id === hintThisRequest.id);
+const thisHints = Array.isArray(hintThis.result) ? hintThis.result : [];
+const thisLine = hintThisText.split('\n')[9];
+check(
+	thisHints.length === 3 &&
+		thisHints[1]?.label === 'id: ' &&
+		thisHints[1]?.position?.character === thisLine.indexOf('$this->id'),
+	'PHP: подпись есть и у аргумента, повторяющего имя параметра ($this->id)',
+);
 
 const hintRequest = request('textDocument/inlayHint', {
 	textDocument: { uri: hintUri },
