@@ -41,7 +41,10 @@ function stubType(?ReflectionType $type): ?string
 function stubDefault(ReflectionParameter $param): ?string
 {
 	if (!$param->isDefaultValueAvailable()) {
-		return $param->isOptional() ? null : null;
+		// Необязательный параметр без доступного значения (часто у встроенных
+		// функций): помечаем как `null`, иначе он считается обязательным и
+		// вызовы вида `array_keys($a)` дают «ожидается аргументов 2–3».
+		return $param->isOptional() ? 'null' : null;
 	}
 	try {
 		$value = $param->getDefaultValue();

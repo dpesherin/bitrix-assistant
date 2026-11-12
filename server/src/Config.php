@@ -17,6 +17,8 @@ final class Config
 		public bool $jsLibraryCheck,
 		public bool $phpSemantic = true,
 		public string $phpVersion = 'auto',
+		/** @var array<int, string> имена функций/методов, которые не проверяем */
+		public array $phpIgnoreSymbols = [],
 	) {
 	}
 
@@ -50,6 +52,15 @@ final class Config
 		}
 		if (isset($bitrix['php']['version']) && is_string($bitrix['php']['version'])) {
 			$this->phpVersion = $bitrix['php']['version'];
+		}
+		if (isset($bitrix['php']['ignoreSymbols']) && is_array($bitrix['php']['ignoreSymbols'])) {
+			$names = [];
+			foreach ($bitrix['php']['ignoreSymbols'] as $name) {
+				if (is_string($name) && trim($name) !== '') {
+					$names[] = strtolower(ltrim(trim($name), '\\'));
+				}
+			}
+			$this->phpIgnoreSymbols = $names;
 		}
 	}
 

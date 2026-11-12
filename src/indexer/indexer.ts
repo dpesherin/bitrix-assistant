@@ -140,6 +140,17 @@ function isFile(p: string): boolean {
 	}
 }
 
+function listFiles(dir: string): string[] {
+	try {
+		return fs
+			.readdirSync(dir, { withFileTypes: true })
+			.filter((entry) => entry.isFile())
+			.map((entry) => path.join(dir, entry.name));
+	} catch {
+		return [];
+	}
+}
+
 function listDirectories(dir: string): string[] {
 	try {
 		return fs
@@ -627,16 +638,48 @@ export class BitrixIndexer implements vscode.Disposable {
 			roots.push(path.join(dir, 'classes'));
 			roots.push(path.join(dir, 'install', 'components'));
 			roots.push(path.join(dir, 'install', 'classes'));
+			// Админские страницы: там объявлены глобальные хелперы вида
+			// __AdmSettingsDrawList(), без них они считались неизвестными.
+			roots.push(path.join(dir, 'admin'));
 		}
 		for (const dir of listDirectories(path.join(layout.localDir, 'modules'))) {
 			roots.push(path.join(dir, 'lib'));
 			roots.push(path.join(dir, 'classes'));
 			roots.push(path.join(dir, 'tools.php'), path.join(dir, 'include.php'));
 		}
+		// PHP-файлы прямо в каталоге модуля: functions.php, options.php, default_option.php
+		// и подобные — там объявлены глобальные функции (например CrmCheckPath).
+		for (const moduleRoot of [
+			...listDirectories(path.join(layout.bitrixDir, 'modules')),
+			...listDirectories(path.join(layout.localDir, 'modules')),
+		]) {
+			for (const file of listFiles(moduleRoot)) {
+				if (!file.endsWith('.php') || isExcluded(path.relative(layout.siteRoot, file), excludes)) {
+					continue;
+				}
+				out.push(file);
+			}
+		}
 		if (includeVendor) {
 			roots.push(path.join(layout.siteRoot, 'vendor'), path.join(layout.localDir, 'vendor'));
+			// vendor бывает вложенным: local/modules/<module>/vendor,
+			// local/php/src/<lib>/vendor и т.п. Без них хелперы пакетов
+			// (например `d()` из Laravel) считаются неизвестными функциями.
+			for (const moduleRoot of [
+				...listDirectories(path.join(layout.bitrixDir, 'modules')),
+				...listDirectories(path.join(layout.localDir, 'modules')),
+			]) {
+				for (const candidate of [path.join(moduleRoot, 'vendor'), path.join(moduleRoot, 'lib', 'vendor')]) {
+					if (isDirectory(candidate)) {
+						roots.push(candidate);
+					}
+				}
+			}
 		}
 		roots.push(
+			// Ядро бизнес-процессов: классы активностей (CBPCrmCreateDynamicActivity
+			// и подобные) объявлены здесь, а не в modules.
+			path.join(layout.bitrixDir, 'activities'),
 			path.join(layout.bitrixDir, 'components'),
 			path.join(layout.localDir, 'components'),
 			path.join(layout.bitrixDir, 'php_interface'),
@@ -647,7 +690,16 @@ export class BitrixIndexer implements vscode.Disposable {
 		);
 		for (const root of roots) {
 			if (isDirectory(root)) {
-				await this.walk(root, layout, excludes, token, out, (file) => file.endsWith('.php'));
+				await this.walk(
+					root,
+					layout,
+					excludes,
+					token,
+					out,
+					(file) => file.endsWith('.php'),
+					undefined,
+					includeVendor,
+				);
 			} else if (root.endsWith('.php') && isFile(root)) {
 				out.push(root);
 			}
@@ -711,6 +763,7 @@ export class BitrixIndexer implements vscode.Disposable {
 		out: string[],
 		accept: (file: string) => boolean,
 		configOut?: string[],
+		allowVendor = false,
 	): Promise<void> {
 		let entries: fs.Dirent[];
 		try {
@@ -726,7 +779,7 @@ export class BitrixIndexer implements vscode.Disposable {
 				continue;
 			}
 			if (entry.isDirectory()) {
-				if (SKIP_DIRS.has(entry.name)) {
+				if (SKIP_DIRS.has(entry.name) && !(allowVendor && entry.name === 'vendor')) {
 					continue;
 				}
 				await this.walk(full, layout, excludes, token, out, accept, configOut);

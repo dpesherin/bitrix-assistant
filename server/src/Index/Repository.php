@@ -453,8 +453,21 @@ final class Repository
 	/**
 	 * @return array<string, mixed>|null
 	 */
-	public function methodByName(string $fqcn, string $name): ?array
+	public function methodByName(string $fqcn, string $name, ?string $file = null): ?array
 	{
+		// Один FQCN может быть объявлен в нескольких файлах: сначала ищем
+		// в том же файле, что и сам класс, иначе берём любое объявление.
+		if ($file !== null && $file !== '') {
+			$row = $this->row(
+				'SELECT class_fqcn, name, signature, return_type, params_json, is_static, visibility, '
+				. 'is_abstract, deprecated, doc, file, line '
+				. 'FROM methods WHERE class_fqcn = ? AND name = ? COLLATE NOCASE AND file = ? LIMIT 1',
+				[ltrim($fqcn, '\\'), $name, $file],
+			);
+			if ($row !== null) {
+				return $row;
+			}
+		}
 		return $this->row(
 			'SELECT class_fqcn, name, signature, return_type, params_json, is_static, visibility, '
 			. 'is_abstract, deprecated, doc, file, line '
@@ -500,7 +513,7 @@ final class Repository
 	/**
 	 * @return array<string, mixed>|null
 	 */
-	public function findMethodInHierarchy(string $fqcn, string $name): ?array
+	public function findMethodInHierarchy(string $fqcn, string $name, ?string $file = null): ?array
 	{
 		$seen = [];
 		$queue = [ltrim($fqcn, '\\')];
@@ -511,7 +524,15 @@ final class Repository
 				continue;
 			}
 			$seen[$className] = true;
-			$method = $this->methodByName($className, $name);
+			$classRow = $className === null ? null : $this->classByName($className);
+			$method = $this->methodByName(
+				(string) $className,
+				$name,
+				$file !== null && $file !== ''
+					? $file
+					: ($classRow !== null ? (string) ($classRow['file'] ?? '') : null),
+			);
+			$file = null; // дальше по иерархии — без привязки к файлу
 			if ($method !== null) {
 				return $method;
 			}
@@ -964,7 +985,7 @@ final class Repository
 		}
 		$row = $this->row(
 			'SELECT name, namespace, fqcn, signature, return_type, params_json, doc, deprecated, file, line '
-			. 'FROM php_functions WHERE fqcn = ? LIMIT 1',
+			. 'FROM php_functions WHERE fqcn = ? COLLATE NOCASE LIMIT 1',
 			[$clean],
 		);
 		if ($row !== null) {

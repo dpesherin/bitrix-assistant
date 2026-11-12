@@ -39,6 +39,8 @@ final class PhpSemanticDiagnostics
 		private readonly Repository $repository,
 		private readonly PhpMethodResolver $resolver,
 		private readonly string $version = 'auto',
+		/** @var array<int, string> */
+		private readonly array $ignoreSymbols = [],
 	) {
 	}
 
@@ -86,7 +88,9 @@ final class PhpSemanticDiagnostics
 			'if', 'elseif', 'while', 'for', 'foreach', 'switch', 'catch', 'function', 'new',
 			'isset', 'empty', 'unset', 'array', 'list', 'echo', 'print', 'include', 'include_once',
 			'require', 'require_once', 'eval', 'match', 'return', 'exit', 'die', 'clone', 'yield',
-			'static', 'global', 'declare', 'namespace', 'use', 'class', 'interface', 'trait',
+			'static', 'global', 'declare', 'namespace', 'use', 'class', 'interface', 'trait', 'fn',
+			// `break(2)` / `continue(2)` — это не вызовы функций.
+			'break', 'continue', 'match', 'throw',
 		], true);
 
 		$callRe = '/(?<![>\\w$:])\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)\\s*\\(/';
@@ -113,6 +117,9 @@ final class PhpSemanticDiagnostics
 				$seen[$key] = true;
 				$function = $this->repository->findFunction($name);
 				if ($function === null) {
+					if (in_array($lower, $this->ignoreSymbols, true)) {
+						continue;
+					}
 					if (!isset($builtins[$lower]) && function_exists($name) === false) {
 						$diagnostics[] = $this->warning(
 							$document,
@@ -216,7 +223,12 @@ final class PhpSemanticDiagnostics
 
 		if (!$this->symbolsOnly) {
 			$diagnostics = array_merge($diagnostics, $this->checkReturnTypes($document, $masked, $context));
-			$diagnostics = array_merge($diagnostics, $this->undefinedVariables($document, $masked));
+			// В подключаемых фрагментах (шаблоны, properties_dialog.php) переменные
+			// приходят из включающего файла — проверка даёт только ложные срабатывания.
+			$selfContained = preg_match('/\b(?:function|class|interface|trait|enum)\s+[A-Za-z_]/i', $masked) === 1;
+			if ($selfContained) {
+				$diagnostics = array_merge($diagnostics, $this->undefinedVariables($document, $masked));
+			}
 		}
 		return array_slice($diagnostics, 0, self::MAX);
 	}
@@ -288,6 +300,9 @@ final class PhpSemanticDiagnostics
 		if ($name === '' || str_starts_with($name, '__')) {
 			return null;
 		}
+		if (in_array(strtolower($name), $this->ignoreSymbols, true)) {
+			return null;
+		}
 		$target = $this->resolver->resolveMemberTarget($document, $nameOffset);
 		if ($target === null) {
 			return null;
@@ -310,6 +325,17 @@ final class PhpSemanticDiagnostics
 		}
 		$row = $this->repository->classByName($class);
 		if ($row !== null && stripos((string) ($row['doc'] ?? ''), '@method') !== false) {
+			return null;
+		}
+		// Интерфейс описывает контракт: у реализации методы могут быть
+		// объявлены иначе (генерируемый ORM-код) — не предупреждаем.
+		if ($row !== null && strtolower((string) ($row['kind'] ?? '')) === 'interface') {
+			return null;
+		}
+		// Динамическая диспетчеризация: `$runtime->GetService('DocumentService')->Foo()`
+		// — тип зависит от строкового аргумента, проверить нельзя.
+		$beforeCall = substr($document->text, max(0, $nameOffset - 240), min(240, $nameOffset));
+		if (preg_match('/(?:->|::)\s*[A-Za-z_][A-Za-z0-9_]*\s*\(\s*[\'"]/', $beforeCall) === 1) {
 			return null;
 		}
 		$magic = $target['operator'] === '::' ? '__callStatic' : '__call';
@@ -350,6 +376,12 @@ final class PhpSemanticDiagnostics
 			return [];
 		}
 		$args = $this->splitArguments($document->text, $open + 1, $close);
+		// `f(...$args)`: количество аргументов неизвестно — не проверяем.
+		foreach ($args as $argument) {
+			if (preg_match('/^\s*\.\.\./', $argument) === 1) {
+				return [];
+			}
+		}
 		$required = 0;
 		$variadic = false;
 		foreach ($params as $param) {
@@ -359,7 +391,12 @@ final class PhpSemanticDiagnostics
 				$required++;
 			}
 		}
-		if (count($args) < $required || (!$variadic && count($args) > count($params))) {
+		// PHP ругается на лишние аргументы только у встроенных функций; у
+		// пользовательских лишние аргументы молча игнорируются (легаси-код на этом живёт).
+		$internal = str_starts_with((string) ($callable['file'] ?? ''), '<phpstub>');
+		$tooFew = count($args) < $required;
+		$tooMany = !$variadic && count($args) > count($params);
+		if ($tooFew || ($tooMany && $internal)) {
 			return [
 				$this->warning(
 					$document,
@@ -840,7 +877,7 @@ final class PhpSemanticDiagnostics
 				$declared[$name] = true;
 			}
 		}
-		if (preg_match_all('/\bforeach\s*\(.*?\bas\b(.*?)\)/s', $masked, $matches) > 0) {
+		if (preg_match_all('/\bforeach\s*\(.*?\bas\b(.*?)\)/is', $masked, $matches) > 0) {
 			foreach ($matches[1] as $body) {
 				if (preg_match_all('/\$([A-Za-z_][A-Za-z0-9_]*)/', $body, $vars) > 0) {
 					foreach ($vars[1] as $name) {
@@ -849,7 +886,7 @@ final class PhpSemanticDiagnostics
 				}
 			}
 		}
-		if (preg_match_all('/\bcatch\s*\(([^)]*)\)/', $masked, $matches) > 0) {
+		if (preg_match_all('/\bcatch\s*\(([^)]*)\)/i', $masked, $matches) > 0) {
 			foreach ($matches[1] as $body) {
 				if (preg_match_all('/\$([A-Za-z_][A-Za-z0-9_]*)/', $body, $vars) > 0) {
 					foreach ($vars[1] as $name) {
@@ -858,7 +895,7 @@ final class PhpSemanticDiagnostics
 				}
 			}
 		}
-		if (preg_match_all('/\blist\s*\(([^)]*)\)/', $masked, $matches) > 0) {
+		if (preg_match_all('/\blist\s*\(([^)]*)\)/i', $masked, $matches) > 0) {
 			foreach ($matches[1] as $body) {
 				if (preg_match_all('/\$([A-Za-z_][A-Za-z0-9_]*)/', $body, $vars) > 0) {
 					foreach ($vars[1] as $name) {
@@ -867,7 +904,7 @@ final class PhpSemanticDiagnostics
 				}
 			}
 		}
-		if (preg_match_all('/\buse\s*\(([^)]*)\)/', $masked, $matches) > 0) {
+		if (preg_match_all('/\buse\s*\(([^)]*)\)/i', $masked, $matches) > 0) {
 			foreach ($matches[1] as $body) {
 				if (preg_match_all('/\$([A-Za-z_][A-Za-z0-9_]*)/', $body, $vars) > 0) {
 					foreach ($vars[1] as $name) {
@@ -876,7 +913,7 @@ final class PhpSemanticDiagnostics
 				}
 			}
 		}
-		if (preg_match_all('/\b(?:global|static)\b([^;]*);/', $masked, $matches) > 0) {
+		if (preg_match_all('/\b(?:global|static)\b([^;]*);/i', $masked, $matches) > 0) {
 			foreach ($matches[1] as $body) {
 				if (preg_match_all('/\$([A-Za-z_][A-Za-z0-9_]*)/', $body, $vars) > 0) {
 					foreach ($vars[1] as $name) {
@@ -891,7 +928,7 @@ final class PhpSemanticDiagnostics
 				$declared[$name] = true;
 			}
 		}
-		if (preg_match_all('/\bfunction\s*[^()]*\(([^)]*)\)/', $masked, $matches) > 0) {
+		if (preg_match_all('/\bfunction\s*[^()]*\(([^)]*)\)/i', $masked, $matches) > 0) {
 			foreach ($matches[1] as $body) {
 				if (preg_match_all('/\$([A-Za-z_][A-Za-z0-9_]*)/', $body, $vars) > 0) {
 					foreach ($vars[1] as $name) {
@@ -900,6 +937,36 @@ final class PhpSemanticDiagnostics
 				}
 			}
 		}
+		// Переменные, переданные по ссылке: `preg_match(..., $matches)`,
+		// `preg_split(..., $parts)` — они объявляются самим вызовом.
+		if (preg_match_all('/(?<![>\w$:])(\\\\?[A-Za-z_][A-Za-z0-9_\\\\]*)\s*\(/', $masked, $calls, PREG_OFFSET_CAPTURE) > 0) {
+			foreach ($calls[0] as $callIndex => $call) {
+				$functionName = $calls[1][$callIndex][0];
+				$function = $this->repository->findFunction($functionName);
+				if ($function === null) {
+					continue;
+				}
+				$functionParams = json_decode((string) ($function['params_json'] ?? '[]'), true);
+				if (!is_array($functionParams) || $functionParams === []) {
+					continue;
+				}
+				$open = $call[1] + strrpos($call[0], '(');
+				$close = $this->matchingParen($masked, $open);
+				if ($close <= $open) {
+					continue;
+				}
+				foreach ($this->splitArguments($document->text, $open + 1, $close) as $argIndex => $argument) {
+					$param = $functionParams[$argIndex] ?? null;
+					if (!is_array($param) || empty($param['byRef'])) {
+						continue;
+					}
+					if (preg_match('/^&?\s*\$([A-Za-z_][A-Za-z0-9_]*)$/', trim($argument), $match) === 1) {
+						$declared[$match[1]] = true;
+					}
+				}
+			}
+		}
+
 		$known = array_fill_keys([
 			'this', 'GLOBALS', '_SERVER', '_GET', '_POST', '_FILES', '_COOKIE', '_SESSION',
 			'_REQUEST', '_ENV', 'APPLICATION', 'USER', 'DB', 'arParams', 'arResult', 'arCurrentValues',
@@ -943,8 +1010,24 @@ final class PhpSemanticDiagnostics
 		$args = [];
 		$depth = 0;
 		$last = $start;
+		$quote = null;
 		for ($i = $start; $i < $end; $i++) {
 			$ch = $text[$i];
+			// Запятые внутри строк не разделяют аргументы: `implode(', ', $a)`.
+			if ($quote !== null) {
+				if ($ch === '\\') {
+					$i++;
+					continue;
+				}
+				if ($ch === $quote) {
+					$quote = null;
+				}
+				continue;
+			}
+			if ($ch === '"' || $ch === "'" || $ch === '`') {
+				$quote = $ch;
+				continue;
+			}
 			if ($ch === '(' || $ch === '[' || $ch === '{') {
 				$depth++;
 			} elseif ($ch === ')' || $ch === ']' || $ch === '}') {

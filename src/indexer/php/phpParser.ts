@@ -541,6 +541,32 @@ function docblockType(doc: string | undefined, tag: 'var' | 'return'): string | 
 	return readType(match[1]);
 }
 
+/** Разбирает строку `@method [static] ReturnType name(params)`. */
+function parseMethodAnnotation(text: string): ParsedMethod | undefined {
+	const match = /^(?:static\s+)?([A-Za-z0-9_\\?|&<>\[\]]+\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)/.exec(text.trim());
+	if (!match) {
+		return undefined;
+	}
+	const returnType = match[1]?.trim() || undefined;
+	const name = match[2];
+	const paramsText = match[3] ?? '';
+	const params = splitParams(paramsText, paramsText, 0, paramsText.length)
+		.map(parseParam)
+		.filter((param): param is ParsedParam => Boolean(param));
+	return {
+		name,
+		signature: `${name}(${paramsText.replace(/\s+/g, ' ').trim()})${returnType ? `: ${returnType}` : ''}`,
+		returnType,
+		params,
+		isStatic: /^static\s+/.test(text.trim()),
+		visibility: 'public',
+		isAbstract: false,
+		line: 0,
+		doc: 'dynamic method',
+		deprecated: false,
+	};
+}
+
 function parseParam(raw: string): ParsedParam | undefined {
 	const text = raw.trim();
 	if (text === '') {
@@ -590,8 +616,21 @@ function resolveImportedName(raw: string, uses: Map<string, string>): string {
 
 function findUseStatements(masked: string): Map<string, string> {
 	const map = new Map<string, string>();
+	// Групповой импорт: `use Prefix\{A, B as C};` — разворачиваем в отдельные строки.
+	const expanded = masked.replace(
+		/\buse\s+([A-Za-z0-9_\\]+)\s*\{([^}]*)\}\s*;/g,
+		(_all: string, prefix: string, body: string): string => {
+			const clean = prefix.replace(/\\+$/, '');
+			const parts = body
+				.split(',')
+				.map((part) => part.trim())
+				.filter((part) => part !== '' && !/^(?:function|const)\s/i.test(part))
+				.map((part) => `use ${clean}\\${part};`);
+			return ` ${parts.join(' ')} `;
+		},
+	);
 	const re = /\buse\s+([A-Za-z0-9_\\]+)(?:\s+as\s+([A-Za-z0-9_]+))?\s*;/g;
-	for (let m = re.exec(masked); m; m = re.exec(masked)) {
+	for (let m = re.exec(expanded); m; m = re.exec(expanded)) {
 		const fqcn = m[1].replace(/^\\/, '');
 		const alias = m[2] ?? fqcn.split('\\').pop();
 		if (alias && !map.has(alias)) {
@@ -607,6 +646,19 @@ export interface ParsedPhpFile {
 	classes: ParsedClass[];
 	functions: ParsedFunction[];
 	constants: ParsedGlobalConstant[];
+}
+
+/** Глубина фигурных скобок между `from` и `to` (0 — уровень тела класса). */
+function braceDepthBetween(masked: string, from: number, to: number): number {
+	let depth = 0;
+	for (let i = from; i < to; i++) {
+		if (masked[i] === '{') {
+			depth++;
+		} else if (masked[i] === '}') {
+			depth--;
+		}
+	}
+	return depth;
 }
 
 /** Лежит ли смещение внутри одного из диапазонов [start, end]. */
@@ -632,7 +684,14 @@ function parseTopLevelFunctions(
 	const re = /\bfunction\s+&?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
 	for (let m = re.exec(masked); m; m = re.exec(masked)) {
 		if (insideRanges(m.index, classRanges)) {
-			continue;
+			// `function` внутри тела метода (например `function clearStr(){}`)
+			// в PHP объявляет ГЛОБАЛЬНУЮ функцию при вызове метода — индексируем
+			// её как обычную функцию. Пропускаем только сами методы класса
+			// (объявление на уровне тела класса, глубина 0).
+			const owner = classRanges.find(([start, end]) => m.index > start && m.index < end);
+			if (!owner || braceDepthBetween(masked, owner[0] + 1, m.index) === 0) {
+				continue;
+			}
 		}
 		const name = m[1];
 		const openParen = re.lastIndex - 1;
@@ -750,6 +809,23 @@ export function parsePhpFile(content: string): ParsedPhpFile {
 		const doc = findDocblock(docblocks, m.index, masked);
 		const deprecatedLine = doc?.text.split('\n').find((line) => /^@deprecated\b/.test(line));
 		const methods: ParsedMethod[] = [];
+		// `@method` в докблоке класса — динамические методы (например ORM-поля:
+		// `@method static Query whereColumnStatus($value)`). Добавляем их в индекс,
+		// иначе вызовы таких методов выглядят как неизвестные.
+		if (doc?.text) {
+			const docLines = doc.text.replace(/\/\*\*?/g, ' ').replace(/\*\//g, ' ').split(/\r?\n/);
+			for (const rawLine of docLines) {
+				const line = rawLine.replace(/^\s*\*\s?/, '').trim();
+				const match = /^@method\s+(.*)$/.exec(line);
+				if (!match) {
+					continue;
+				}
+				const parsed = parseMethodAnnotation(match[1]);
+				if (parsed !== undefined) {
+					methods.push(parsed);
+				}
+			}
+		}
 
 		const fnRe =
 			/((?:(?:public|protected|private|static|abstract|final|readonly)\s+)*)function\s+&?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;

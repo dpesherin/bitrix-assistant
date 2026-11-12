@@ -2,7 +2,7 @@
 	"name": "bitrix-assistant",
 	"displayName": "Bitrix Assistant",
 	"description": "Индекс ядра 1С-Битрикс, подсказки PHP и JS (LSP), SSH-синхронизация с сервером и терминал на сервере — без внешних сервисов и LLM",
-	"version": "0.4.7",
+	"version": "0.4.8",
 	"publisher": "pesherind",
 	"license": "MIT",
 	"engines": {
@@ -210,6 +210,11 @@
 				"command": "bitrix.debugDumpCompletions",
 				"title": "Bitrix Assistant: дамп подсказок в позиции",
 				"category": "Bitrix Assistant"
+			},
+			{
+				"command": "bitrix.php.diagnoseAll",
+				"title": "Bitrix Assistant: проверить весь проект",
+				"category": "Bitrix Assistant"
 			}
 		],
 		"configuration": {
@@ -371,6 +376,23 @@
 					"type": "boolean",
 					"default": true,
 					"description": "Индексировать PHP-файлы Composer-зависимостей (vendor/ и local/vendor/): подсказки, hover и переходы по классам библиотек."
+				},
+				"bitrix.diagnostics.projectLimit": {
+					"type": "number",
+					"default": 500,
+					"minimum": 1,
+					"maximum": 2000,
+					"description": "Сколько файлов проверять командой «Проверить весь проект» (сначала файлы проекта, затем ядро)."
+				},
+				"bitrix.php.ignoreSymbols": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"default": [
+						"d"
+					],
+					"description": "Имена функций и методов, которые не проверять на существование (например внешние хелперы вроде d)."
 				}
 			}
 		},

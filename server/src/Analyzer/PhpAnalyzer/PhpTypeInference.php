@@ -517,6 +517,20 @@ final class PhpTypeInference
 		}
 		for ($guard = 0; $guard < self::MAX_DEPTH; $guard++) {
 			$next = null;
+			// Продолжение цепочки: `->method()` к уже известному результату.
+			// Раньше шаг цепочки обрабатывался только сразу после вызова, поэтому
+			// третья и последующие ссылки (`a()->b()->c()->d()`) терялись.
+			if ($candidates !== [] && preg_match('/^\s*->\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/', $current, $chainNext) === 1) {
+				$candidates = $this->methodCallReturnCandidates($candidates, $chainNext[1], $context);
+				if ($candidates === []) {
+					return [];
+				}
+				$current = $this->afterCall($current, strlen($chainNext[0]) - 1);
+				if ($current === null) {
+					return $candidates;
+				}
+				continue;
+			}
 			if (preg_match('/^\$GLOBALS\s*\[\s*[\'"]([A-Za-z_][A-Za-z0-9_]*)[\'"]\s*\]$/', $current, $globalsMatch) === 1) {
 			$class = PhpDocumentContext::globalClass($globalsMatch[1]);
 			return $class !== null ? [$class] : [];

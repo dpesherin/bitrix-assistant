@@ -176,6 +176,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<Active
 			await ext.lsp.restart();
 			void vscode.window.showInformationMessage('Bitrix LSP перезапущен');
 		}),
+		vscode.commands.registerCommand('bitrix.php.diagnoseAll', async () => {
+			const limit = vscode.workspace
+				.getConfiguration('bitrix')
+				.get<number>('diagnostics.projectLimit', 500);
+			try {
+				const result = await vscode.window.withProgress(
+					{
+						location: vscode.ProgressLocation.Notification,
+						title: 'Bitrix Assistant: проверка проекта',
+					},
+					() => ext.lsp.diagnoseAll(limit),
+				);
+				const suffix = result.truncated
+					? ` Проверены первые ${result.files} файлов, лимит можно увеличить в настройках.`
+					: '';
+				void vscode.window.showInformationMessage(
+					`Проверено файлов: ${result.files}, диагностик: ${result.diagnostics}.${suffix}`,
+				);
+			} catch (err) {
+				void vscode.window.showErrorMessage(`Bitrix Assistant: ${errorMessage(err)}`);
+			}
+		}),
 	);
 
 	registerWatchers(context, ext);

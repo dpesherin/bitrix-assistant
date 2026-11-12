@@ -116,7 +116,7 @@ final class Server
 		$this->phpDiagnostics = new PhpDiagnostics(
 			$this->repository,
 			$this->config,
-			new PhpSemanticDiagnostics($this->repository, $methodResolver, $this->config->phpVersion),
+			new PhpSemanticDiagnostics($this->repository, $methodResolver, $this->config->phpVersion, $this->config->phpIgnoreSymbols),
 		);
 		$this->phpSignatureHelp = new PhpSignatureHelpProvider($this->repository, $methodResolver);
 	}
@@ -217,6 +217,9 @@ final class Server
 				break;
 			case 'textDocument/rename':
 				$this->respond($id, $this->rename($params));
+				break;
+			case 'workspace/diagnoseAll':
+				$this->respond($id, $this->diagnoseAll($params));
 				break;
 			case 'textDocument/codeLens':
 				$this->respond($id, $this->codeLens($params));
@@ -973,6 +976,52 @@ final class Server
 			$diagnostics = $this->collectDiagnostics($document);
 		}
 		return $this->libraryQuickFix->provide($document, $diagnostics);
+	}
+
+	/**
+	 * Диагностика по всему проекту: обходит проиндексированные PHP-файлы
+	 * (сначала файлы проекта) и публикует результаты для каждого.
+	 *
+	 * @param array<string, mixed> $params
+	 * @return array{files: int, diagnostics: int, truncated: bool}
+	 */
+	private function diagnoseAll(array $params): array
+	{
+		$limit = (int) ($params['limit'] ?? 500);
+		$limit = max(1, min(2000, $limit));
+		$files = $this->repository->indexedPhpFiles($limit, true);
+		$scanned = 0;
+		$found = 0;
+		foreach ($files as $file) {
+			if (str_starts_with($file, '<') || !is_file($file)) {
+				continue;
+			}
+			$size = @filesize($file);
+			if ($size === false || $size > 2_000_000) {
+				continue;
+			}
+			$uri = Paths::pathToUri($file);
+			$document = $this->documents[$uri] ?? null;
+			if ($document === null) {
+				$text = @file_get_contents($file);
+				if (!is_string($text)) {
+					continue;
+				}
+				$document = new TextDocument($uri, 'php', $text);
+			}
+			$diagnostics = $this->collectDiagnostics($document);
+			$this->notify('textDocument/publishDiagnostics', [
+				'uri' => $uri,
+				'diagnostics' => $diagnostics,
+			]);
+			$scanned++;
+			$found += count($diagnostics);
+		}
+		return [
+			'files' => $scanned,
+			'diagnostics' => $found,
+			'truncated' => count($files) >= $limit,
+		];
 	}
 
 	/**

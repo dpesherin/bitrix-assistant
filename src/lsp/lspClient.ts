@@ -199,6 +199,21 @@ export class BitrixLanguageClient implements vscode.Disposable {
 	}
 
 	/** Попросить сервер перевалидировать открытые документы (после обновления индекса). */
+	/**
+	 * Диагностика по всему проекту: сервер обходит проиндексированные файлы
+	 * и публикует результаты, поэтому они появляются в Problems.
+	 */
+	async diagnoseAll(limit: number): Promise<{ files: number; diagnostics: number; truncated: boolean }> {
+		const client = this.client;
+		if (!client || client.state !== State.Running) {
+			throw new Error('LSP-сервер не запущен');
+		}
+		return await client.sendRequest<{ files: number; diagnostics: number; truncated: boolean }>(
+			'workspace/diagnoseAll',
+			{ limit },
+		);
+	}
+
 	refreshDiagnostics(): void {
 		const client = this.client;
 		if (!client || client.state !== State.Running) {

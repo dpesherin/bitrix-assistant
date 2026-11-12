@@ -231,11 +231,15 @@ export class IndexWriter {
 				);
 				written++;
 			}
+			const seenClasses = new Set<string>();
 			for (const entry of classes) {
 				const fqcn = String(entry.fqcn ?? '');
-				if (fqcn === '') {
+				// Дубликаты в стабах (например DOMException) ломали INSERT
+				// по UNIQUE(file, fqcn) и откатывали всю транзакцию.
+				if (fqcn === '' || seenClasses.has(fqcn)) {
 					continue;
 				}
+				seenClasses.add(fqcn);
 				const file = `<phpstub>/${fqcn.replace(/\\/g, '/')}.php`;
 				const parts = fqcn.split('\\');
 				const short = parts.pop() ?? fqcn;
@@ -328,9 +332,12 @@ export class IndexWriter {
 			this.db.run('DELETE FROM php_functions WHERE file = ?', file);
 			this.db.run('DELETE FROM php_constants WHERE file = ?', file);
 			for (const row of this.db.all<{ fqcn: string }>('SELECT fqcn FROM classes WHERE file = ?', file)) {
-				this.db.run('DELETE FROM methods WHERE class_fqcn = ?', row.fqcn);
-				this.db.run('DELETE FROM properties WHERE class_fqcn = ?', row.fqcn);
-				this.db.run('DELETE FROM constants WHERE class_fqcn = ?', row.fqcn);
+				// Один FQCN может быть объявлен в нескольких файлах (копии компонентов,
+				// install/components). Удаляем только строки этого файла, иначе
+				// переиндексация одного файла стирала методы его тёзок.
+				this.db.run('DELETE FROM methods WHERE class_fqcn = ? AND file = ?', row.fqcn, file);
+				this.db.run('DELETE FROM properties WHERE class_fqcn = ? AND file = ?', row.fqcn, file);
+				this.db.run('DELETE FROM constants WHERE class_fqcn = ? AND file = ?', row.fqcn, file);
 			}
 			this.db.run('DELETE FROM classes WHERE file = ?', file);
 			for (const fn of parsed.functions) {
@@ -470,9 +477,12 @@ export class IndexWriter {
 			this.db.run('DELETE FROM php_functions WHERE file = ?', file);
 			this.db.run('DELETE FROM php_constants WHERE file = ?', file);
 			for (const row of this.db.all<{ fqcn: string }>('SELECT fqcn FROM classes WHERE file = ?', file)) {
-				this.db.run('DELETE FROM methods WHERE class_fqcn = ?', row.fqcn);
-				this.db.run('DELETE FROM properties WHERE class_fqcn = ?', row.fqcn);
-				this.db.run('DELETE FROM constants WHERE class_fqcn = ?', row.fqcn);
+				// Один FQCN может быть объявлен в нескольких файлах (копии компонентов,
+				// install/components). Удаляем только строки этого файла, иначе
+				// переиндексация одного файла стирала методы его тёзок.
+				this.db.run('DELETE FROM methods WHERE class_fqcn = ? AND file = ?', row.fqcn, file);
+				this.db.run('DELETE FROM properties WHERE class_fqcn = ? AND file = ?', row.fqcn, file);
+				this.db.run('DELETE FROM constants WHERE class_fqcn = ? AND file = ?', row.fqcn, file);
 			}
 			this.db.run('DELETE FROM classes WHERE file = ?', file);
 			this.db.run('DELETE FROM js_globals WHERE source_file = ?', file);

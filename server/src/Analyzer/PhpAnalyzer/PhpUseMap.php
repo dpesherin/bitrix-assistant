@@ -15,6 +15,27 @@ final class PhpUseMap
 	public static function parse(string $text): array
 	{
 		$masked = \BitrixLsp\Analyzer\JsAnalyzer\JsScanner::maskCode(PhpSource::phpOnly($text), true);
+		// Групповой импорт: `use Bitrix\Main\{DateTime, IO\Directory as Dir};`.
+		// Разворачиваем в обычные строки, чтобы работал общий разбор ниже.
+		$expanded = preg_replace_callback(
+			'/\buse\s+([A-Za-z0-9_\\\\]+)\s*\{([^}]*)\}\s*;/',
+			static function (array $match): string {
+				$prefix = rtrim($match[1], '\\\\');
+				$lines = [];
+				foreach (explode(',', $match[2]) as $part) {
+					$part = trim($part);
+					if ($part === '' || preg_match('/^(?:function|const)\s/i', $part) === 1) {
+						continue;
+					}
+					$lines[] = 'use ' . $prefix . '\\' . $part . ';';
+				}
+				return ' ' . implode(' ', $lines) . ' ';
+			},
+			$masked,
+		);
+		if (is_string($expanded)) {
+			$masked = $expanded;
+		}
 		$map = [];
 		if (preg_match_all('/\buse\s+([A-Za-z0-9_\\\\]+)(?:\s+as\s+([A-Za-z0-9_]+))?\s*;/', $masked, $matches, PREG_SET_ORDER) === false) {
 			return [];

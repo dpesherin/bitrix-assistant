@@ -1094,12 +1094,12 @@ const phpParamDiagnostics = await waitFor(
 	(message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === phpParamUri,
 );
 const codes = phpParamDiagnostics.params.diagnostics.map((item) => item.code);
-check(codes.includes('bitrix.php.undeclared-param'), 'PHP: диагностика необъявленного $arParams');
-check(codes.includes('bitrix.php.deprecated-class'), 'PHP: диагностика @deprecated');
 check(
-	!phpParamDiagnostics.params.diagnostics.some((item) => item.data?.param === 'DECLARED'),
-	'PHP: объявленный параметр не считается ошибкой',
+	!codes.includes('bitrix.php.undeclared-param'),
+	'PHP: проверка необъявленных $arParams отключена (слишком шумная)',
 );
+check(codes.includes('bitrix.php.deprecated-class'), 'PHP: диагностика @deprecated');
+
 const semanticUri = pathToFileURL(path.join(site, 'local/php_interface/semantic.php')).toString();
 const semanticText = `<?php
 declare(strict_types=1);

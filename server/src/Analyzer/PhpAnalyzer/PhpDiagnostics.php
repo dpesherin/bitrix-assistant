@@ -72,7 +72,9 @@ final class PhpDiagnostics
 				? $this->semantic->check($document)
 				: $this->semantic->checkSymbols($document),
 		);
-		return array_merge($diagnostics, $this->parameterDiagnostics($document));
+		// `undeclared-param` не проверяем: у компонентов параметры часто приходят
+		// из шаблона или родительского компонента, проверка давала поток ложных.
+		return $diagnostics;
 	}
 
 	/**
@@ -158,6 +160,17 @@ final class PhpDiagnostics
 		}
 		$component = $this->repository->componentForFile($path);
 		if ($component === null) {
+			return [];
+		}
+		// Компоненты ядра принимают runtime-параметры, которых нет в .parameters.php
+		// (их передают шаблоны и родительские компоненты) — не проверяем их.
+		$componentPath = (string) ($component['path'] ?? '');
+		if (str_contains($componentPath, '/bitrix/components/') || str_contains($componentPath, '/install/components/')) {
+			return [];
+		}
+		// Нет .parameters.php — сравнивать не с чем: параметры приходят от шаблона
+		// или родительского компонента, это не ошибка.
+		if (trim((string) ($component['parameters_file'] ?? '')) === '') {
 			return [];
 		}
 		$params = $this->repository->paramsForComponent((string) $component['name']);

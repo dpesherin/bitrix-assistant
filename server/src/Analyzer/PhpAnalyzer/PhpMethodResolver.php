@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BitrixLsp\Analyzer\PhpAnalyzer;
 
 use BitrixLsp\Index\Repository;
+use BitrixLsp\Support\Paths;
 use BitrixLsp\Support\TextDocument;
 
 /**
@@ -35,7 +36,14 @@ final class PhpMethodResolver
 		if ($target === null) {
 			return null;
 		}
-		$method = $this->repository->findMethodInHierarchy($target['class'], $target['token']['name']);
+		// `$this` объявлен в текущем файле: ищем метод именно в нём, иначе можно
+		// взять тёзку-класс из другой копии проекта (и его сигнатуру).
+		$file = null;
+		$receiverText = rtrim(substr($document->text, 0, $target['token']['start']));
+		if (preg_match('/\$this\s*->\s*$/', $receiverText) === 1) {
+			$file = Paths::uriToPath($document->uri);
+		}
+		$method = $this->repository->findMethodInHierarchy($target['class'], $target['token']['name'], $file);
 		if ($method === null) {
 			return null;
 		}
@@ -95,7 +103,8 @@ final class PhpMethodResolver
 			if (str_contains($receiverText, '(') || str_contains($receiverText, '->')) {
 				$candidates = $this->inference->expressionCandidatesFor($context, $receiverText, $offset);
 				if ($candidates !== []) {
-					return ['token' => $token, 'class' => $candidates[0], 'operator' => $operator];
+					$specific = $this->mostSpecific($candidates);
+					return ['token' => $token, 'class' => $specific[0], 'operator' => $operator];
 				}
 			}
 		}
@@ -177,6 +186,32 @@ final class PhpMethodResolver
 		return null;
 	}
 
+	/**
+	 * Из объединения типов (`@return Parent | Child`) оставляет самые конкретные:
+	 * метод обычно объявлен у потомка, и поиск по родителю его не находит.
+	 *
+	 * @param array<int, string> $candidates
+	 * @return array<int, string>
+	 */
+	private function mostSpecific(array $candidates): array
+	{
+		if (count($candidates) < 2) {
+			return $candidates;
+		}
+		$specific = array_values(array_filter(
+			$candidates,
+			function (string $candidate) use ($candidates): bool {
+				foreach ($candidates as $other) {
+					if (strcasecmp($candidate, $other) !== 0 && $this->repository->classIsA($other, $candidate)) {
+						return false;
+					}
+				}
+				return true;
+			},
+		));
+		return $specific === [] ? $candidates : $specific;
+	}
+
 	private function resolveInstanceReceiver(string $receiver, PhpDocumentContext $context, int $offset): ?string
 	{
 		if (!str_starts_with($receiver, '$')) {
@@ -191,25 +226,7 @@ final class PhpMethodResolver
 		if ($candidates === []) {
 			return null;
 		}
-		// Объявленный тип бывает объединением (`@return Parent | Child`).
-		// Метод обычно объявлен у потомка, поэтому из пары «родитель и потомок»
-		// берём потомка: иначе `getPostList()` у `Request` не находится.
-		if (count($candidates) > 1) {
-			$specific = array_values(array_filter(
-				$candidates,
-				function (string $candidate) use ($candidates): bool {
-					foreach ($candidates as $other) {
-						if (strcasecmp($candidate, $other) !== 0 && $this->repository->classIsA($other, $candidate)) {
-							return false; // candidate — предок other
-						}
-					}
-					return true;
-				},
-			));
-			if ($specific !== []) {
-				$candidates = $specific;
-			}
-		}
-		return $candidates[0];
+		$specific = $this->mostSpecific($candidates);
+		return $specific[0];
 	}
 }

@@ -34,6 +34,21 @@ final class JsScanner
 				}
 				continue;
 			}
+			if ($ch === '<' && $next === '<' && ($text[$i + 2] ?? '') === '<') {
+				// `<<<EOT` / `<<<'EOT'` / `<<<"EOT"`: тело до закрывающей метки — строка.
+				if (preg_match('/\G<<<[ \t]*(?:"([A-Za-z_][A-Za-z0-9_]*)"|\'([A-Za-z_][A-Za-z0-9_]*)\'|([A-Za-z_][A-Za-z0-9_]*))\r?\n/', $text, $match, 0, $i) === 1) {
+					$label = ($match[1] ?? '') !== '' ? $match[1] : ((($match[2] ?? '') !== '' ? $match[2] : ($match[3] ?? '')));
+					$bodyStart = $i + strlen($match[0]);
+					$stop = $length;
+					if ($label !== '' && preg_match('/^[ \t]*' . preg_quote($label, '/') . '\b/m', substr($text, $bodyStart), $close, PREG_OFFSET_CAPTURE) === 1) {
+						$stop = $bodyStart + $close[0][1] + strlen($close[0][0]);
+					}
+					for (; $i < $stop && $i < $length; $i++) {
+						$out .= $text[$i] === "\n" ? "\n" : ' ';
+					}
+					continue;
+				}
+			}
 			if ($maskStrings && ($ch === '"' || $ch === "'" || $ch === '`')) {
 				$quote = $ch;
 				$out .= ' ';
