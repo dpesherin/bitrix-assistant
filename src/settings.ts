@@ -5,6 +5,7 @@ export interface BitrixSettings {
 	downloadOnOpen: boolean;
 	sshExclude: string[];
 	sshAutoConnect: boolean;
+	sshConcurrency: number;
 	indexEnabled: boolean;
 	indexPhpStubs: boolean;
 	indexVendor: boolean;
@@ -34,6 +35,7 @@ export function readSettings(scope?: vscode.Uri): BitrixSettings {
 		downloadOnOpen: Boolean(ssh.downloadOnOpen ?? false),
 		sshExclude: Array.isArray(ssh.exclude) ? (ssh.exclude as string[]) : [],
 		sshAutoConnect: Boolean(ssh.autoConnect ?? false),
+		sshConcurrency: Number(ssh.concurrency ?? 4),
 		indexEnabled: Boolean(index.enabled ?? true),
 		indexPhpStubs: Boolean(index.phpStubs ?? true),
 		indexVendor: Boolean(index.vendor ?? true),

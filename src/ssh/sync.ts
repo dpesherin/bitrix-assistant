@@ -6,7 +6,8 @@ import { activeFolder } from '../indexer/indexer';
 import { errorMessage, log } from '../log';
 import { readSettings } from '../settings';
 import { isExcluded, toPosix } from '../util/glob';
-import { SshConnectionManager } from './connection';
+import { mapPool } from '../util/pool';
+import { ByteProgress, SshConnectionManager } from './connection';
 import { RemoteEntry } from './types';
 
 export type SyncMode = 'both' | 'upload' | 'download';
@@ -20,8 +21,78 @@ export interface SyncResult {
 	skipped: number;
 }
 
+/** Ход переноса каталога: сколько файлов и байт уже позади. */
+export interface TransferState {
+	doneFiles: number;
+	totalFiles: number;
+	doneBytes: number;
+	totalBytes: number;
+}
+
+export type TransferProgress = (state: TransferState) => void;
+
+/** Счётчик прогресса: байты по чанкам + число готовых файлов, с троттлингом. */
+class Meter {
+	private doneFiles = 0;
+	private doneBytes = 0;
+	private lastEmit = 0;
+
+	constructor(
+		private readonly totalFiles: number,
+		private readonly totalBytes: number,
+		private readonly onState?: TransferProgress,
+	) {}
+
+	/** Колбэк для одного файла: ssh2 отдаёт накопленные байты этого файла. */
+	fileProgress(): ByteProgress {
+		let previous = 0;
+		return (transferred: number) => {
+			this.doneBytes += transferred - previous;
+			previous = transferred;
+			this.emit();
+		};
+	}
+
+	fileDone(): void {
+		this.doneFiles++;
+		this.emit();
+	}
+
+	finish(): void {
+		this.emit(true);
+	}
+
+	private emit(force = false): void {
+		if (!this.onState) {
+			return;
+		}
+		const now = Date.now();
+		if (!force && now - this.lastEmit < 150) {
+			return;
+		}
+		this.lastEmit = now;
+		this.onState({
+			doneFiles: this.doneFiles,
+			totalFiles: this.totalFiles,
+			// На повторной попытке (пересоздание каталога) счётчик может обогнать
+			// план — проценты не должны уезжать за 100.
+			doneBytes: Math.min(this.doneBytes, this.totalBytes),
+			totalBytes: this.totalBytes,
+		});
+	}
+}
+
+/** Сколько файлов переносить одновременно (настройка bitrix.ssh.concurrency). */
+function transferConcurrency(): number {
+	const value = Number(readSettings().sshConcurrency);
+	return Number.isFinite(value) ? Math.min(16, Math.max(1, Math.floor(value))) : 4;
+}
+
 /** Сопоставление локального и удалённого дерева + операции загрузки/скачивания. */
 export class SyncService {
+	/** Каталоги, которые уже точно есть на сервере: экономит stat при каждой загрузке. */
+	private readonly knownDirs = new Set<string>();
+
 	constructor(private readonly connections: SshConnectionManager) {}
 
 	private localRootFor(localPath?: string): string | undefined {
@@ -73,7 +144,7 @@ export class SyncService {
 		return isExcluded(relative, readSettings().sshExclude);
 	}
 
-	async upload(localPath: string): Promise<UploadOutcome> {
+	async upload(localPath: string, progress?: ByteProgress): Promise<UploadOutcome> {
 		if (!this.connections.isConnected) {
 			throw new Error('Нет активного SSH-подключения');
 		}
@@ -93,8 +164,20 @@ export class SyncService {
 		if (decision !== 'upload') {
 			return decision;
 		}
-		await this.connections.mkdirp(path.posix.dirname(remotePath));
-		await this.uploadAtomic(localPath, remotePath);
+		const remoteDir = path.posix.dirname(remotePath);
+		// Каталог уже создавали в этой сессии — не тратим на него stat-раундтрипы.
+		if (this.knownDirs.has(remoteDir)) {
+			try {
+				await this.uploadAtomic(localPath, remotePath, progress);
+				return 'uploaded';
+			} catch (err) {
+				// Каталог могли удалить на сервере: пересоздаём и повторяем один раз.
+				this.knownDirs.delete(remoteDir);
+				log().debug(`SSH: каталог ${remoteDir} пропал, пересоздаю (${errorMessage(err)})`);
+			}
+		}
+		await this.ensureRemoteDir(remoteDir, this.knownDirs);
+		await this.uploadAtomic(localPath, remotePath, progress);
 		return 'uploaded';
 	}
 
@@ -167,10 +250,10 @@ export class SyncService {
 		return choice === 'Перезаписать' ? 'upload' : 'cancelled';
 	}
 
-	private async uploadAtomic(localPath: string, remotePath: string): Promise<void> {
+	private async uploadAtomic(localPath: string, remotePath: string, progress?: ByteProgress): Promise<void> {
 		const temp = `${remotePath}.bitrix-assistant-${process.pid}.tmp`;
 		try {
-			await this.connections.fastPut(localPath, temp);
+			await this.connections.fastPut(localPath, temp, progress);
 			// Резервную копию `<файл>.bak` не делаем: замена идёт через temp,
 			// поэтому недописанный файл на сервер не попадает.
 			await this.connections.replace(temp, remotePath);
@@ -180,26 +263,44 @@ export class SyncService {
 		}
 	}
 
+	/** Создаёт каталог на сервере один раз за операцию, без повторных stat. */
+	private async ensureRemoteDir(remoteDir: string, cache: Set<string>): Promise<void> {
+		const parts = remoteDir.replace(/\/+$/, '').split('/').filter(Boolean);
+		let current = '';
+		for (const part of parts) {
+			current += `/${part}`;
+			if (cache.has(current)) {
+				continue;
+			}
+			if (!(await this.connections.stat(current))) {
+				await this.connections.mkdir(current);
+			}
+			cache.add(current);
+		}
+	}
+
 	/** Файлы, у которых серверная версия новее локальной (по mtime, допуск 2 с). */
 	private async newerOnServer(files: readonly string[]): Promise<Set<string>> {
 		const newer = new Set<string>();
-		for (const file of files) {
+		// Проверка конфликтов — это по одному stat на файл: последовательно на
+		// каталоге в сотни файлов она занимала больше времени, чем сама загрузка.
+		await mapPool(files, Math.min(8, Math.max(4, transferConcurrency())), async (file) => {
 			const remotePath = this.toRemotePath(file);
 			if (!remotePath || this.isExcludedPath(file)) {
-				continue;
+				return;
 			}
 			const remote = await this.connections.stat(remotePath);
 			const local = await this.statOrUndefined(file);
 			if (!remote || remote.mtime === undefined || !local) {
-				continue;
+				return;
 			}
 			if (local.mtimeMs / 1000 + 2 < remote.mtime) {
 				if (await this.sameContent(file, remotePath, remote.size)) {
-					continue;
+					return;
 				}
 				newer.add(file);
 			}
-		}
+		});
 		return newer;
 	}
 
@@ -214,7 +315,7 @@ export class SyncService {
 		return choice === 'Перезаписать все';
 	}
 
-	async download(remotePath: string, localPath?: string): Promise<string | undefined> {
+	async download(remotePath: string, localPath?: string, progress?: ByteProgress): Promise<string | undefined> {
 		const target = localPath ?? this.toLocalPath(remotePath);
 		if (!target) {
 			throw new Error('Удалённый путь вне remoteRoot');
@@ -222,7 +323,7 @@ export class SyncService {
 		if (this.isExcludedPath(target)) {
 			return undefined;
 		}
-		await this.connections.fastGet(remotePath, target);
+		await this.connections.fastGet(remotePath, target, progress);
 		return target;
 	}
 
@@ -231,6 +332,7 @@ export class SyncService {
 		remotePath: string,
 		report: (message: string) => void = () => undefined,
 		token?: vscode.CancellationToken,
+		onProgress?: TransferProgress,
 	): Promise<SyncResult> {
 		if (!this.connections.isConnected) {
 			throw new Error('Нет активного SSH-подключения');
@@ -247,30 +349,35 @@ export class SyncService {
 			if (this.isExcludedPath(target)) {
 				throw new Error('Путь исключён настройкой bitrix.ssh.exclude');
 			}
-			await this.connections.fastGet(remotePath, target);
+			const meter = new Meter(1, info.size, onProgress);
+			await this.connections.fastGet(remotePath, target, meter.fileProgress());
+			meter.fileDone();
+			meter.finish();
 			return { uploaded: 0, downloaded: 1, skipped: 0 };
 		}
 		const files: RemoteEntry[] = [];
 		report('Обход каталога на сервере…');
 		await this.walkRemote(remotePath, files, token);
 		report(`Файлов к скачиванию: ${files.length}`);
+		const totalBytes = files.reduce((sum, entry) => sum + (entry.size ?? 0), 0);
+		const meter = new Meter(files.length, totalBytes, onProgress);
 		let downloaded = 0;
 		let skipped = 0;
-		for (const entry of files) {
+		await mapPool(files, transferConcurrency(), async (entry) => {
 			if (token?.isCancellationRequested) {
 				throw new vscode.CancellationError();
 			}
 			const target = this.toLocalPath(entry.path);
 			if (!target || this.isExcludedPath(target)) {
 				skipped++;
-				continue;
+				meter.fileDone();
+				return;
 			}
-			await this.connections.fastGet(entry.path, target);
+			await this.connections.fastGet(entry.path, target, meter.fileProgress());
 			downloaded++;
-			if (downloaded % 10 === 0) {
-				report(`Скачано ${downloaded}/${files.length}`);
-			}
-		}
+			meter.fileDone();
+		});
+		meter.finish();
 		return { uploaded: 0, downloaded, skipped };
 	}
 
@@ -279,6 +386,7 @@ export class SyncService {
 		localPath: string,
 		report: (message: string) => void = () => undefined,
 		token?: vscode.CancellationToken,
+		onProgress?: TransferProgress,
 	): Promise<SyncResult> {
 		if (!this.connections.isConnected) {
 			throw new Error('Нет активного SSH-подключения');
@@ -288,10 +396,13 @@ export class SyncService {
 			throw new Error(`Локальный путь не найден: ${localPath}`);
 		}
 		if (stat.isFile()) {
-			const outcome = await this.upload(localPath);
+			const meter = new Meter(1, stat.size, onProgress);
+			const outcome = await this.upload(localPath, meter.fileProgress());
 			if (outcome === 'identical') {
 				report('Содержимое совпадает с серверным — загрузка не нужна');
 			}
+			meter.fileDone();
+			meter.finish();
 			const uploaded = outcome === 'uploaded';
 			return { uploaded: uploaded ? 1 : 0, downloaded: 0, skipped: uploaded ? 0 : 1 };
 		}
@@ -302,30 +413,36 @@ export class SyncService {
 		report('Обход локального каталога…');
 		await this.walkLocal(localPath, files, token);
 		report(`Файлов к загрузке: ${files.length}`);
+		const sizes = new Map<string, number>();
+		let totalBytes = 0;
+		for (const file of files) {
+			const info = await this.statOrUndefined(file);
+			const size = info?.size ?? 0;
+			sizes.set(file, size);
+			totalBytes += size;
+		}
 		const conflicts = await this.newerOnServer(files);
 		const skipConflicts = conflicts.size > 0 && !(await this.confirmBulkOverwrite(conflicts.size));
+		const meter = new Meter(files.length, totalBytes, onProgress);
+		const dirs = new Set<string>();
 		let uploaded = 0;
 		let skipped = 0;
-		for (const file of files) {
+		await mapPool(files, transferConcurrency(), async (file) => {
 			if (token?.isCancellationRequested) {
 				throw new vscode.CancellationError();
 			}
 			const remotePath = this.toRemotePath(file);
-			if (!remotePath || this.isExcludedPath(file)) {
+			if (!remotePath || this.isExcludedPath(file) || (skipConflicts && conflicts.has(file))) {
 				skipped++;
-				continue;
+				meter.fileDone();
+				return;
 			}
-			if (skipConflicts && conflicts.has(file)) {
-				skipped++;
-				continue;
-			}
-			await this.connections.mkdirp(path.posix.dirname(remotePath));
-			await this.uploadAtomic(file, remotePath);
+			await this.ensureRemoteDir(path.posix.dirname(remotePath), dirs);
+			await this.uploadAtomic(file, remotePath, meter.fileProgress());
 			uploaded++;
-			if (uploaded % 10 === 0) {
-				report(`Загружено ${uploaded}/${files.length}`);
-			}
-		}
+			meter.fileDone();
+		});
+		meter.finish();
 		return { uploaded, downloaded: 0, skipped };
 	}
 
@@ -387,6 +504,7 @@ export class SyncService {
 			}
 		}
 
+		const dirs = new Set<string>();
 		for (const entry of remoteFiles) {
 			if (token?.isCancellationRequested) {
 				throw new vscode.CancellationError();
@@ -418,7 +536,7 @@ export class SyncService {
 			}
 			if (mode === 'upload' || mode === 'both') {
 				if (localSeconds > remoteSeconds) {
-					await this.connections.mkdirp(path.posix.dirname(entry.path));
+					await this.ensureRemoteDir(path.posix.dirname(entry.path), dirs);
 					await this.uploadAtomic(localPath, entry.path);
 					result.uploaded++;
 					continue;
@@ -440,7 +558,7 @@ export class SyncService {
 				if (!remotePath || remoteSet.has(remotePath) || this.isExcludedPath(localFile)) {
 					continue;
 				}
-				await this.connections.mkdirp(path.posix.dirname(remotePath));
+				await this.ensureRemoteDir(path.posix.dirname(remotePath), dirs);
 				await this.uploadAtomic(localFile, remotePath);
 				result.uploaded++;
 			}

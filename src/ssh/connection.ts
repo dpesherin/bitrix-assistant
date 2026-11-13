@@ -47,12 +47,44 @@ function timingSafeEqual(left: string, right: string): boolean {
 	return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+/** Ошибки, после которых сессия заведомо мертва и её надо поднимать заново. */
+function isGoneError(err: unknown): boolean {
+	const message = errorMessage(err).toLowerCase();
+	return ['no response from server', 'channel closed', 'connection lost', 'not connected', 'econnreset', 'epipe', 'etimedout', 'socket hang up'].some(
+		(needle) => message.includes(needle),
+	);
+}
+
+/** Прогресс передачи по байтам: сколько перенесено и всего. */
+export type ByteProgress = (transferred: number, total: number) => void;
+
+/**
+ * Колбэк `step` из ssh2 дёргается на каждый чанк — для интерфейса это слишком
+ * часто, поэтому отдаём не чаще, чем раз в `interval` мс.
+ * Аргументы ssh2: (перенесено всего, байт в чанке, размер файла).
+ */
+function throttleStep(
+	progress: ByteProgress,
+	interval = 120,
+): (total: number, bytes: number, fileSize: number) => void {
+	let last = 0;
+	return (total: number, _bytes: number, fileSize: number) => {
+		const now = Date.now();
+		if (total < fileSize && now - last < interval) {
+			return;
+		}
+		last = now;
+		progress(total, fileSize);
+	};
+}
+
 /** Одно активное SSH-подключение (MVP): sftp-канал + сериализация запросов. */
 export class SshConnectionManager implements vscode.Disposable {
 	private active?: ActiveConnection;
 	private pending?: Promise<void>;
 	private lastProfile?: SshProfile;
 	private reconnect?: Promise<void>;
+	private dead = false;
 	private readonly changed = new vscode.EventEmitter<void>();
 	readonly onDidChangeConnection = this.changed.event;
 
@@ -62,9 +94,18 @@ export class SshConnectionManager implements vscode.Disposable {
 		return this.active?.profile;
 	}
 
+	/**
+	 * Профиль для интерфейса: пока идёт автопереподключение, показываем тот,
+	 * с которым работали, — иначе статус-бар мигал бы «сервер не выбран».
+	 */
+	get displayProfile(): SshProfile | undefined {
+		return this.active?.profile ?? this.lastProfile;
+	}
+
 	get isConnected(): boolean {
 		return Boolean(this.active);
 	}
+
 
 	async connect(profile: SshProfile): Promise<void> {
 		if (this.active?.profile.id === profile.id) {
@@ -83,10 +124,17 @@ export class SshConnectionManager implements vscode.Disposable {
 		const client = await this.authenticate(profile);
 		client.on('error', (err) => log().warn(`SSH: ${errorMessage(err)}`));
 		client.on('close', () => {
-			if (this.active?.client === client) {
-				this.active = undefined;
-				this.changed.fire();
+			if (this.active?.client !== client) {
+				return;
 			}
+			this.active = undefined;
+			this.dead = true;
+			log().warn('SSH: соединение закрыто сервером');
+			this.changed.fire();
+			// Сервер сам закрыл простаивающую сессию — поднимаем её сразу, чтобы
+			// следующая загрузка не ждала рукопожатия, а статус-бар не мигал
+			// «сервер не выбран».
+			this.warmUp();
 		});
 		const sftp = await new Promise<SFTPWrapper>((resolve, reject) => {
 			client.sftp((err, channel) => {
@@ -98,9 +146,19 @@ export class SshConnectionManager implements vscode.Disposable {
 			});
 		});
 		this.active = { profile, client, sftp };
+		this.dead = false;
 		this.changed.fire();
 		log().info(`SSH подключён: ${profile.username}@${profile.host}:${profile.port} (${profile.remoteRoot})`);
 	}
+
+	/** Фоновое переподключение без запроса от операции (после обрыва/idle-таймаута). */
+	private warmUp(): void {
+		if (!this.lastProfile || this.active || this.reconnect) {
+			return;
+		}
+		void this.channel().catch((err) => log().debug(`SSH: фоновое переподключение не удалось: ${errorMessage(err)}`));
+	}
+
 
 	/**
 	 * Подключается и проверяет host key. Если сохранённый пароль не подошёл
@@ -245,16 +303,21 @@ export class SshConnectionManager implements vscode.Disposable {
 		return active.sftp;
 	}
 
-	/** Выполняет sftp-операцию, повторяя её один раз после переподключения. */
+	/**
+	 * Выполняет sftp-операцию, повторяя её один раз после переподключения.
+	 * Переподключаемся только когда сессия действительно умерла: раньше любая
+	 * ошибка (нет прав, нет файла, отказ rename) рвала соединение — отсюда были
+	 * и «мигание» статус-бара, и лишнее рукопожатие на каждой загрузке.
+	 */
 	private async call<T>(operation: (channel: SFTPWrapper) => Promise<T>): Promise<T> {
 		const first = await this.channel();
 		try {
 			return await operation(first);
 		} catch (err) {
-			if (!this.lastProfile) {
+			if (!this.lastProfile || (!this.dead && !isGoneError(err))) {
 				throw err;
 			}
-			log().warn(`SSH: операция не удалась, переподключаюсь (${errorMessage(err)})`);
+			log().warn(`SSH: обрыв во время операции, переподключаюсь (${errorMessage(err)})`);
 			this.disconnectActive();
 			const second = await this.channel();
 			return operation(second);
@@ -264,6 +327,7 @@ export class SshConnectionManager implements vscode.Disposable {
 	private disconnectActive(): void {
 		const active = this.active;
 		this.active = undefined;
+		this.dead = true;
 		if (active) {
 			active.client.end();
 			this.changed.fire();
@@ -336,10 +400,11 @@ export class SshConnectionManager implements vscode.Disposable {
 		}));
 	}
 
-	async fastGet(remotePath: string, localPath: string): Promise<void> {
+	async fastGet(remotePath: string, localPath: string, progress?: ByteProgress): Promise<void> {
 		await fs.promises.mkdir(path.dirname(localPath), { recursive: true });
 		await this.call((channel) => new Promise<void>((resolve, reject) => {
-			channel.fastGet(remotePath, localPath, (err) => {
+			const options = progress ? { step: throttleStep(progress) } : {};
+			channel.fastGet(remotePath, localPath, options, (err) => {
 				if (err) {
 					reject(err);
 					return;
@@ -349,9 +414,10 @@ export class SshConnectionManager implements vscode.Disposable {
 		}));
 	}
 
-	async fastPut(localPath: string, remotePath: string): Promise<void> {
+	async fastPut(localPath: string, remotePath: string, progress?: ByteProgress): Promise<void> {
 		await this.call((channel) => new Promise<void>((resolve, reject) => {
-			channel.fastPut(localPath, remotePath, (err) => {
+			const options = progress ? { step: throttleStep(progress) } : {};
+			channel.fastPut(localPath, remotePath, options, (err) => {
 				if (err) {
 					reject(err);
 					return;

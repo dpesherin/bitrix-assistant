@@ -242,3 +242,58 @@ test('пути: Windows-разделители нормализуются', () =
 	assert.equal(toPosix('C:\\site\\local\\a.php'), 'C:/site/local/a.php');
 	assert.equal(isExcluded('bitrix\\cache\\x.php', ['bitrix/cache/**']), true);
 });
+
+test('sftp: много файлов в каталоге — параллельно, с прогрессом по файлам и байтам', async () => {
+	const files: string[] = [];
+	for (let index = 0; index < 12; index++) {
+		files.push(writeLocal(`many/dir${index % 3}/file${index}.php`, `content-${index}`));
+	}
+	const totalBytes = files.reduce((sum, file) => sum + fs.statSync(file).size, 0);
+	const states: Array<{ doneFiles: number; totalFiles: number; doneBytes: number; totalBytes: number }> = [];
+	const result = await sync.uploadEntry(
+		path.join(siteDir, 'many'),
+		() => undefined,
+		undefined,
+		(state) => states.push({ ...state }),
+	);
+	assert.equal(result.uploaded, 12);
+	assert.equal(read('many/dir0/file0.php'), 'content-0');
+	assert.equal(read('many/dir2/file11.php'), 'content-11');
+	assert.ok(states.length > 0, 'прогресс должен приходить');
+	assert.deepEqual(states[0].totalFiles, 12);
+	assert.deepEqual(states.at(-1)?.totalFiles, 12);
+	assert.deepEqual(states.at(-1)?.doneFiles, 12);
+	assert.deepEqual(states.at(-1)?.totalBytes, totalBytes);
+	assert.deepEqual(states.at(-1)?.doneBytes, totalBytes);
+});
+
+test('sftp: прогресс скачивания каталога доходит до конца', async () => {
+	const states: Array<{ doneFiles: number; totalFiles: number; doneBytes: number; totalBytes: number }> = [];
+	fs.rmSync(path.join(siteDir, 'many'), { recursive: true, force: true });
+	const result = await sync.downloadEntry(
+		'/site/many',
+		() => undefined,
+		undefined,
+		(state) => states.push({ ...state }),
+	);
+	assert.equal(result.downloaded, 12);
+	assert.equal(states.at(-1)?.doneFiles, 12);
+	assert.ok((states.at(-1)?.doneBytes ?? 0) > 0);
+	assert.equal(fs.readFileSync(path.join(siteDir, 'many', 'dir1', 'file1.php'), 'utf8'), 'content-1');
+});
+
+test('sftp: ошибка операции не рвёт соединение (без лишнего переподключения)', async () => {
+	await assert.rejects(() => manager.readFile('/site/definitely-missing.php'));
+	assert.equal(manager.isConnected, true);
+	// Соединение живое: следующая операция проходит без рукопожатия.
+	assert.equal((await manager.stat('/site/a.php'))?.type, 'file');
+});
+
+test('sftp: fastPut отдаёт прогресс по байтам и финальный размер', async () => {
+	const local = writeLocal('progress.php', 'x'.repeat(200_000));
+	const seen: Array<[number, number]> = [];
+	await manager.fastPut(local, '/site/progress.php', (done, total) => seen.push([done, total]));
+	assert.ok(seen.length > 0);
+	assert.deepEqual(seen.at(-1), [200_000, 200_000]);
+	await manager.unlink('/site/progress.php');
+});

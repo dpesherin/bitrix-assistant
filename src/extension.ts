@@ -13,14 +13,15 @@ import { BitrixIndexer, isIndexableSource, resolveLayout } from './indexer/index
 import { errorMessage, initLog, log, showLog } from './log';
 import { BitrixLanguageClient } from './lsp/lspClient';
 import { readSettings } from './settings';
-import { SshConnectionManager } from './ssh/connection';
+import { ByteProgress, SshConnectionManager } from './ssh/connection';
 import { RemotePreview } from './ssh/preview';
 import { ProfileStore } from './ssh/profiles';
 import { SshTerminal } from './ssh/terminal';
 import { RemoteNode, RemoteTreeProvider } from './ssh/remoteTree';
-import { SyncMode, SyncService } from './ssh/sync';
+import { SyncMode, SyncService, TransferProgress } from './ssh/sync';
 import { SshProfile } from './ssh/types';
 import { isExcluded } from './util/glob';
+import { formatSize } from './util/format';
 import { IndexViewProvider } from './views/indexView';
 import { BitrixStatusBar } from './views/statusBar';
 import { PhpVersionStatusBar } from './views/phpVersionStatus';
@@ -670,7 +671,7 @@ async function saveAndUpload(ext: ActiveExtension): Promise<void> {
 				title: `Bitrix Assistant: загрузка ${name}`,
 				cancellable: false,
 			},
-			() => ext.sync.upload(uri.fsPath),
+			(progress) => ext.sync.upload(uri.fsPath, byteProgress(progress)),
 		);
 		if (outcome === 'uploaded') {
 			ext.tree.refresh();
@@ -759,6 +760,36 @@ function targetUri(arg?: vscode.Uri): vscode.Uri | undefined {
 	return undefined;
 }
 
+type TransferProgressUi = vscode.Progress<{ message?: string; increment?: number }>;
+
+/** Прогресс одного файла по байтам (шаг чанка приходит из ssh2). */
+function byteProgress(progress: TransferProgressUi): ByteProgress {
+	let previous = 0;
+	return (transferred: number, total: number) => {
+		const percent = total > 0 ? Math.min(100, Math.floor((transferred / total) * 100)) : 0;
+		progress.report({
+			increment: total > 0 ? Math.max(0, ((transferred - previous) / total) * 100) : 0,
+			message: `${formatSize(transferred)} / ${formatSize(total)} (${percent}%)`,
+		});
+		previous = transferred;
+	};
+}
+
+/** Прогресс каталога: файлы + суммарные байты. */
+function transferProgress(progress: TransferProgressUi): TransferProgress {
+	let previous = 0;
+	return (state) => {
+		const percent = state.totalBytes > 0 ? Math.min(100, Math.floor((state.doneBytes / state.totalBytes) * 100)) : 0;
+		const files = state.totalFiles > 1 ? `${state.doneFiles} из ${state.totalFiles} файлов · ` : '';
+		progress.report({
+			increment:
+				state.totalBytes > 0 ? Math.max(0, ((state.doneBytes - previous) / state.totalBytes) * 100) : 0,
+			message: `${files}${formatSize(state.doneBytes)} / ${formatSize(state.totalBytes)} (${percent}%)`,
+		});
+		previous = state.doneBytes;
+	};
+}
+
 async function upload(ext: ActiveExtension, arg?: vscode.Uri): Promise<void> {
 	const uri = targetUri(arg);
 	if (!uri) {
@@ -789,7 +820,7 @@ async function upload(ext: ActiveExtension, arg?: vscode.Uri): Promise<void> {
 				title: `Bitrix Assistant: загрузка ${name}`,
 				cancellable: false,
 			},
-			() => ext.sync.upload(uri.fsPath),
+			(progress) => ext.sync.upload(uri.fsPath, byteProgress(progress)),
 		);
 		if (outcome === 'uploaded') {
 			ext.tree.refresh();
@@ -830,7 +861,7 @@ async function download(ext: ActiveExtension, arg?: vscode.Uri): Promise<void> {
 	try {
 		await vscode.window.withProgress(
 			{ location: vscode.ProgressLocation.Notification, title: `Скачивание ${path.basename(uri.fsPath)}` },
-			() => ext.sync.download(remotePath, uri.fsPath),
+			(progress) => ext.sync.download(remotePath, uri.fsPath, byteProgress(progress)),
 		);
 		if (vscode.window.activeTextEditor?.document.uri.toString() === uri.toString()) {
 			await vscode.commands.executeCommand('workbench.action.files.revert');
@@ -951,6 +982,7 @@ async function downloadRemote(ext: ActiveExtension, arg?: RemoteNode | string): 
 					remotePath,
 					(message) => progress.report({ message }),
 					token,
+					transferProgress(progress),
 				);
 				downloaded = result.downloaded;
 				skipped = result.skipped;
@@ -1149,6 +1181,7 @@ async function uploadLocal(ext: ActiveExtension, arg?: RemoteNode | string): Pro
 					localPath,
 					(message) => progress.report({ message }),
 					token,
+					transferProgress(progress),
 				);
 				uploaded = result.uploaded;
 				skipped = result.skipped;

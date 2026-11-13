@@ -22,7 +22,8 @@ export class BitrixStatusBar implements vscode.Disposable {
 	}
 
 	update(): void {
-		const profile = this.connections.activeProfile;
+		const connected = this.connections.isConnected;
+		const profile = this.connections.displayProfile;
 		if (this.indexing) {
 			this.item.text = '$(sync~spin) Bitrix Assistant: индексация…';
 			this.item.tooltip = 'Bitrix Assistant: обновление индекса';
@@ -31,11 +32,16 @@ export class BitrixStatusBar implements vscode.Disposable {
 			return;
 		}
 		if (profile) {
-			this.item.text = `$(server) ${profile.name}`;
+			// Пока идёт автопереподключение, профиль известен: показываем его, а не
+			// «сервер не выбран» — иначе статус-бар мигал бы на каждой загрузке.
+			this.item.text = connected
+				? `$(server) ${profile.name}`
+				: `$(sync~spin) ${profile.name}: переподключение…`;
 			this.item.tooltip = new vscode.MarkdownString(
 				`**Сервер: ${profile.name}**\n\n` +
 					`\`${profile.username}@${profile.host}:${profile.port}\`\n\n` +
 					`${profile.remoteRoot}\n\n` +
+					(connected ? '' : '_Соединение восстанавливается…_\n\n') +
 					'Клик — сменить сервер\n\n' +
 					'[Удалить SSH-профиль](command:bitrix.ssh.removeProfile)',
 			);
