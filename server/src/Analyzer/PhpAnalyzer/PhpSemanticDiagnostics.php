@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BitrixLsp\Analyzer\PhpAnalyzer;
 
 use BitrixLsp\Analyzer\JsAnalyzer\JsScanner;
+use BitrixLsp\Config;
 use BitrixLsp\Index\Repository;
 use BitrixLsp\Support\PhpSource;
 use BitrixLsp\Support\TextDocument;
@@ -38,9 +39,7 @@ final class PhpSemanticDiagnostics
 	public function __construct(
 		private readonly Repository $repository,
 		private readonly PhpMethodResolver $resolver,
-		private readonly string $version = 'auto',
-		/** @var array<int, string> */
-		private readonly array $ignoreSymbols = [],
+		private readonly Config $config,
 	) {
 	}
 
@@ -71,7 +70,7 @@ final class PhpSemanticDiagnostics
 		$diagnostics = [];
 		$seen = [];
 		$builtins = array_fill_keys(array_map('strtolower', get_defined_functions()['internal'] ?? []), true);
-		$target = $this->version === 'auto' ? PHP_VERSION : $this->version;
+		$target = $this->config->phpVersion === 'auto' ? PHP_VERSION : $this->config->phpVersion;
 		$runtime = PHP_VERSION;
 		foreach (self::ADDED_FUNCTIONS as $introduced => $functions) {
 			$add = version_compare($target, $introduced, '>=') && version_compare($runtime, $introduced, '<');
@@ -117,7 +116,7 @@ final class PhpSemanticDiagnostics
 				$seen[$key] = true;
 				$function = $this->repository->findFunction($name);
 				if ($function === null) {
-					if (in_array($lower, $this->ignoreSymbols, true)) {
+					if (in_array($lower, $this->config->phpIgnoreSymbols, true)) {
 						continue;
 					}
 					if (!isset($builtins[$lower]) && function_exists($name) === false) {
@@ -300,7 +299,7 @@ final class PhpSemanticDiagnostics
 		if ($name === '' || str_starts_with($name, '__')) {
 			return null;
 		}
-		if (in_array(strtolower($name), $this->ignoreSymbols, true)) {
+		if (in_array(strtolower($name), $this->config->phpIgnoreSymbols, true)) {
 			return null;
 		}
 		$target = $this->resolver->resolveMemberTarget($document, $nameOffset);
@@ -879,7 +878,9 @@ final class PhpSemanticDiagnostics
 	private function undefinedVariables(TextDocument $document, string $masked): array
 	{
 		$declared = [];
-		$assign = '/\\$([A-Za-z_][A-Za-z0-9_]*)\\s*(?:\\[[^\\]]*\\]\\s*)?(?:=|\\.=|\\+=|-=|\\*=|\\/=|\\?\\?=|%=)/';
+		// Присваивание, в том числе запись по индексу: `$a[$k]['x'] = ...`.
+		// `$a[...] = ...` создаёт переменную, предупреждения "undefined" в PHP не будет.
+		$assign = '/\\$([A-Za-z_][A-Za-z0-9_]*)(?:\\s*\\[[^\\[\\]]*(?:\\[[^\\[\\]]*\\][^\\[\\]]*)*\\])*\\s*(?:=|\\.=|\\+=|-=|\\*=|\\/=|\\?\\?=|%=)/';
 		if (preg_match_all($assign, $masked, $matches) > 0) {
 			foreach ($matches[1] as $name) {
 				$declared[$name] = true;
@@ -934,6 +935,28 @@ final class PhpSemanticDiagnostics
 		if (preg_match_all('/\b(?:public|protected|private|var|readonly|static|final)\s+(?:[?\\\\A-Za-z0-9_|]+\s+)?\$([A-Za-z_][A-Za-z0-9_]*)\s*(?:=|;)/', $masked, $matches) > 0) {
 			foreach ($matches[1] as $name) {
 				$declared[$name] = true;
+			}
+		}
+		// `extract($array)` заводит переменные с неизвестными именами — статически
+		// проверить такие файлы нельзя, поэтому проверку не делаем.
+		if (preg_match('/\bextract\s*\(/i', $masked) > 0) {
+			return [];
+		}
+		// Docblock-аннотации объявляют переменные включённых файлов:
+		// `/** @var PropertiesDialog $dialog */`.
+		if (preg_match_all('/@var\s+[^\s*]+\s+\$([A-Za-z_][A-Za-z0-9_]*)/', $document->text, $matches) > 0) {
+			foreach ($matches[1] as $name) {
+				$declared[$name] = true;
+			}
+		}
+		// Стрелочные функции: `fn($a, $b) => ...` — их параметры тоже объявления.
+		if (preg_match_all('/(?<!->)\bfn\s*\(([^)]*)\)/', $masked, $matches) > 0) {
+			foreach ($matches[1] as $body) {
+				if (preg_match_all('/\$([A-Za-z_][A-Za-z0-9_]*)/', $body, $vars) > 0) {
+					foreach ($vars[1] as $name) {
+						$declared[$name] = true;
+					}
+				}
 			}
 		}
 		if (preg_match_all('/\bfunction\s*[^()]*\(([^)]*)\)/i', $masked, $matches) > 0) {

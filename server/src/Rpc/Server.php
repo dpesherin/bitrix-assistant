@@ -116,7 +116,7 @@ final class Server
 		$this->phpDiagnostics = new PhpDiagnostics(
 			$this->repository,
 			$this->config,
-			new PhpSemanticDiagnostics($this->repository, $methodResolver, $this->config->phpVersion, $this->config->phpIgnoreSymbols),
+			new PhpSemanticDiagnostics($this->repository, $methodResolver, $this->config),
 		);
 		$this->phpSignatureHelp = new PhpSignatureHelpProvider($this->repository, $methodResolver);
 	}

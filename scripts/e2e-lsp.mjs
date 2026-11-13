@@ -1101,12 +1101,23 @@ check(
 check(codes.includes('bitrix.php.deprecated-class'), 'PHP: диагностика @deprecated');
 
 const semanticUri = pathToFileURL(path.join(site, 'local/php_interface/semantic.php')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'workspace/didChangeConfiguration',
+	params: { settings: { bitrix: { php: { ignoreSymbols: ['d'] } } } },
+});
 const semanticText = `<?php
 declare(strict_types=1);
 test_helper();
 test_helper(123);
 missing_function();
 $notDeclared;
+$bag['x']['y'] = 1;
+$bag['x']['z'] = 2;
+$arrowList = array_map(fn($item) => $item + 1, []);
+/** @var \\Vendor\\Demo\\Item $annotated */
+$annotated;
+d('debug');
 function no_return(): array { $x = 1; }
 function wrong_return(): array { return 'x'; }
 function union_return(): array|false { return 5; }
@@ -1129,7 +1140,25 @@ const semanticCodes = semanticDiagnostics.params.diagnostics.map((item) => item.
 check(semanticCodes.includes('bitrix.php.argument-count'), 'PHP: семантика — число аргументов');
 check(semanticCodes.includes('bitrix.php.argument-type'), 'PHP: семантика — тип аргумента');
 check(semanticCodes.includes('bitrix.php.unknown-function'), 'PHP: семантика — неизвестная функция');
+const unknownMessages = semanticDiagnostics.params.diagnostics
+	.filter((item) => item.code === 'bitrix.php.unknown-function')
+	.map((item) => String(item.message));
+check(
+	unknownMessages.some((message) => message.includes('missing_function')),
+	'PHP: unknown-function находит missing_function',
+);
+check(
+	!unknownMessages.some((message) => message.includes('d()')),
+	'PHP: bitrix.php.ignoreSymbols применяется после старта сервера',
+);
 check(semanticCodes.includes('bitrix.php.undefined-variable'), 'PHP: семантика — неизвестная переменная');
+const undefinedMessages = semanticDiagnostics.params.diagnostics
+	.filter((item) => item.code === 'bitrix.php.undefined-variable')
+	.map((item) => String(item.message));
+check(
+	undefinedMessages.length === 1 && undefinedMessages[0].includes('$notDeclared'),
+	`PHP: undefined-variable только для $notDeclared (${undefinedMessages.join('; ')})`,
+);
 check(semanticCodes.includes('bitrix.php.return-type'), 'PHP: семантика — тип возврата');
 const returnMessages = semanticDiagnostics.params.diagnostics
 	.filter((item) => item.code === 'bitrix.php.return-type')
