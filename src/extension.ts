@@ -769,6 +769,18 @@ async function upload(ext: ActiveExtension, arg?: vscode.Uri): Promise<void> {
 		void vscode.window.showWarningMessage('Bitrix Assistant: нет SSH-подключения');
 		return;
 	}
+	// Команда из контекстного меню Explorer приходит и на папку. Без этой ветки путь
+	// каталога уходил в fastPut и падал с «EISDIR: illegal operation on a directory».
+	const localStat = await fs.promises.stat(uri.fsPath).catch(() => undefined);
+	if (localStat?.isDirectory()) {
+		const remoteDir = ext.sync.toRemotePath(uri.fsPath);
+		if (!remoteDir) {
+			void vscode.window.showWarningMessage('Bitrix Assistant: папка вне локального корня проекта');
+			return;
+		}
+		await uploadLocal(ext, remoteDir);
+		return;
+	}
 	const name = path.basename(uri.fsPath);
 	try {
 		const outcome = await vscode.window.withProgress(
@@ -807,6 +819,12 @@ async function download(ext: ActiveExtension, arg?: vscode.Uri): Promise<void> {
 	const remotePath = ext.sync.toRemotePath(uri.fsPath);
 	if (!remotePath) {
 		void vscode.window.showWarningMessage('Bitrix Assistant: файл вне локального корня проекта');
+		return;
+	}
+	// То же для скачивания: папку нельзя отдавать в fastGet как файл.
+	const localStat = await fs.promises.stat(uri.fsPath).catch(() => undefined);
+	if (localStat?.isDirectory()) {
+		await downloadRemote(ext, remotePath);
 		return;
 	}
 	try {

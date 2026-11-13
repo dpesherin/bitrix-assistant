@@ -84,6 +84,11 @@ export class SyncService {
 		if (this.isExcludedPath(localPath)) {
 			return 'excluded';
 		}
+		// Загрузка одиночного файла: каталог сюда попадать не должен (иначе fastPut
+		// падает с EISDIR) — для каталогов есть uploadEntry.
+		if ((await this.statOrUndefined(localPath))?.isDirectory()) {
+			throw new Error('Это каталог, а не файл: загрузите каталог целиком (uploadEntry)');
+		}
 		const decision = await this.confirmOverwrite(localPath, remotePath);
 		if (decision !== 'upload') {
 			return decision;

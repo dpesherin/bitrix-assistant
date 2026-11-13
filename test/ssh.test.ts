@@ -141,6 +141,37 @@ test('sftp: каталог — один общий вопрос и пропус�
 	assert.ok(result.skipped >= 1);
 });
 
+test('sftp: upload каталога не доходит до fastPut (внятная ошибка вместо EISDIR)', async () => {
+	writeLocal('dirForUpload/x.php', 'x');
+	await assert.rejects(
+		() => sync.upload(path.join(siteDir, 'dirForUpload')),
+		/каталог/i,
+	);
+});
+
+test('sftp: вложенные каталоги загружаются рекурсивно', async () => {
+	writeLocal('nested/one.php', '1');
+	writeLocal('nested/sub/two.php', '2');
+	writeLocal('nested/sub/deep/three.php', '3');
+	const result = await sync.uploadEntry(path.join(siteDir, 'nested'));
+	assert.equal(result.uploaded, 3);
+	assert.equal(read('nested/one.php'), '1');
+	assert.equal(read('nested/sub/two.php'), '2');
+	assert.equal(read('nested/sub/deep/three.php'), '3');
+});
+
+test('sftp: вложенные каталоги скачиваются рекурсивно с созданием подпапок', async () => {
+	fs.rmSync(path.join(siteDir, 'nested'), { recursive: true, force: true });
+	const result = await sync.downloadEntry('/site/nested');
+	assert.equal(result.downloaded, 3);
+	assert.equal(fs.readFileSync(path.join(siteDir, 'nested', 'one.php'), 'utf8'), '1');
+	assert.equal(fs.readFileSync(path.join(siteDir, 'nested', 'sub', 'two.php'), 'utf8'), '2');
+	assert.equal(
+		fs.readFileSync(path.join(siteDir, 'nested', 'sub', 'deep', 'three.php'), 'utf8'),
+		'3',
+	);
+});
+
 test('sftp: скачивание сохраняет локальный .bak', async () => {
 	const local = writeLocal('b.php', 'old-local');
 	fs.writeFileSync(path.join(server.root, 'site', 'b.php'), 'remote-new');
