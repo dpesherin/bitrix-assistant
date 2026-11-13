@@ -367,6 +367,27 @@ export class SshConnectionManager implements vscode.Disposable {
 		}));
 	}
 
+	/**
+	 * Замена файла без резервной копии: posix-rename (атомарная перезапись) там,
+	 * где сервер его поддерживает, иначе unlink + обычный rename. Обычный
+	 * SSH_FXP_RENAME по протоколу не перезаписывает существующую цель.
+	 */
+	async replace(from: string, to: string): Promise<void> {
+		await this.call((channel) => new Promise<void>((resolve, reject) => {
+			const fallback = (): void => {
+				channel.unlink(to, () => {
+					channel.rename(from, to, (err) => (err ? reject(err) : resolve()));
+				});
+			};
+			try {
+				channel.ext_openssh_rename(from, to, (err) => (err ? fallback() : resolve()));
+			} catch {
+				// расширение posix-rename@openssh.com не поддерживается
+				fallback();
+			}
+		}));
+	}
+
 	async unlink(remotePath: string): Promise<void> {
 		await this.call((channel) => new Promise<void>((resolve) => {
 			channel.unlink(remotePath, () => resolve());

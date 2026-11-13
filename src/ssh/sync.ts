@@ -169,35 +169,14 @@ export class SyncService {
 
 	private async uploadAtomic(localPath: string, remotePath: string): Promise<void> {
 		const temp = `${remotePath}.bitrix-assistant-${process.pid}.tmp`;
-		const backup = `${remotePath}.bak`;
-		let backedUp = false;
 		try {
 			await this.connections.fastPut(localPath, temp);
-			const current = await this.connections.stat(remotePath);
-			if (current?.type === 'file') {
-				await this.connections.unlink(backup);
-				await this.connections.rename(remotePath, backup);
-				backedUp = true;
-			}
-			await this.connections.rename(temp, remotePath);
+			// Резервную копию `<файл>.bak` не делаем: замена идёт через temp,
+			// поэтому недописанный файл на сервер не попадает.
+			await this.connections.replace(temp, remotePath);
 		} catch (err) {
 			await this.connections.unlink(temp);
-			if (backedUp) {
-				await this.connections.rename(backup, remotePath).catch(() => undefined);
-			}
 			throw err;
-		}
-	}
-
-	/** Локальная резервная копия перед перезаписью скачанным файлом. */
-	private async backupLocal(localPath: string): Promise<void> {
-		try {
-			const stat = await fs.promises.stat(localPath);
-			if (stat.isFile()) {
-				await fs.promises.copyFile(localPath, `${localPath}.bak`);
-			}
-		} catch {
-			// нового локального файла ещё нет — бэкап не нужен
 		}
 	}
 
@@ -243,7 +222,6 @@ export class SyncService {
 		if (this.isExcludedPath(target)) {
 			return undefined;
 		}
-		await this.backupLocal(target);
 		await this.connections.fastGet(remotePath, target);
 		return target;
 	}
@@ -269,7 +247,6 @@ export class SyncService {
 			if (this.isExcludedPath(target)) {
 				throw new Error('Путь исключён настройкой bitrix.ssh.exclude');
 			}
-			await this.backupLocal(target);
 			await this.connections.fastGet(remotePath, target);
 			return { uploaded: 0, downloaded: 1, skipped: 0 };
 		}
@@ -288,7 +265,6 @@ export class SyncService {
 				skipped++;
 				continue;
 			}
-			await this.backupLocal(target);
 			await this.connections.fastGet(entry.path, target);
 			downloaded++;
 			if (downloaded % 10 === 0) {
@@ -435,7 +411,6 @@ export class SyncService {
 			}
 			if (mode === 'download' || (mode === 'both' && remoteSeconds > localSeconds)) {
 				if (remoteSeconds > localSeconds) {
-					await this.backupLocal(localPath);
 					await this.connections.fastGet(entry.path, localPath);
 					result.downloaded++;
 					continue;

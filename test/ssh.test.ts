@@ -82,11 +82,11 @@ test('sftp: атомарная загрузка без временных фай
 	assert.deepEqual(leftovers, []);
 });
 
-test('sftp: перезапись сохраняет серверный .bak', async () => {
+test('sftp: перезапись не оставляет серверный .bak', async () => {
 	writeLocal('a.php', 'v2');
 	assert.equal(await sync.upload(path.join(siteDir, 'a.php')), 'uploaded');
 	assert.equal(read('a.php'), 'v2');
-	assert.equal(read('a.php.bak'), 'v1');
+	assert.equal(fs.existsSync(path.join(server.root, 'site', 'a.php.bak')), false);
 });
 
 test('sftp: конфликт — отказ не перезаписывает сервер', async () => {
@@ -98,11 +98,11 @@ test('sftp: конфликт — отказ не перезаписывает с
 	assert.ok(mockState.prompts.at(-1)?.includes('новее'));
 });
 
-test('sftp: конфликт — подтверждение перезаписывает и делает .bak', async () => {
+test('sftp: конфликт — подтверждение перезаписывает, без .bak', async () => {
 	mockState.promptResult = 'Перезаписать';
 	assert.equal(await sync.upload(path.join(siteDir, 'a.php')), 'uploaded');
 	assert.equal(read('a.php'), 'v3');
-	assert.equal(read('a.php.bak'), 'v2');
+	assert.equal(fs.existsSync(path.join(server.root, 'site', 'a.php.bak')), false);
 });
 
 test('sftp: одинаковое содержимое — не конфликт, без вопроса', async () => {
@@ -172,13 +172,13 @@ test('sftp: вложенные каталоги скачиваются реку�
 	);
 });
 
-test('sftp: скачивание сохраняет локальный .bak', async () => {
+test('sftp: скачивание перезаписывает без локального .bak', async () => {
 	const local = writeLocal('b.php', 'old-local');
 	fs.writeFileSync(path.join(server.root, 'site', 'b.php'), 'remote-new');
 	makeRemoteNewer('b.php');
 	await sync.download('/site/b.php', local);
 	assert.equal(fs.readFileSync(local, 'utf8'), 'remote-new');
-	assert.equal(fs.readFileSync(`${local}.bak`, 'utf8'), 'old-local');
+	assert.equal(fs.existsSync(`${local}.bak`), false);
 });
 
 test('sftp: переподключение после обрыва связи', async () => {
