@@ -92,6 +92,11 @@ const mock = {
 			};
 		},
 	},
+	commands: {
+		async executeCommand(_command: string, ..._args: unknown[]): Promise<undefined> {
+			return undefined;
+		},
+	},
 	Uri: {
 		file(fsPath: string) {
 			return { fsPath, scheme: 'file', toString: () => `file://${fsPath}` };

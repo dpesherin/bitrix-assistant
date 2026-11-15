@@ -297,3 +297,56 @@ test('sftp: fastPut отдаёт прогресс по байтам и фина�
 	assert.deepEqual(seen.at(-1), [200_000, 200_000]);
 	await manager.unlink('/site/progress.php');
 });
+
+/** Свободный порт, на котором гарантированно никто не слушает. */
+async function freePort(): Promise<number> {
+	const net = await import('node:net');
+	const probe = net.createServer();
+	await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', () => resolve()));
+	const address = probe.address();
+	const port = typeof address === 'object' && address ? address.port : 0;
+	await new Promise<void>((resolve) => probe.close(() => resolve()));
+	return port;
+}
+
+test('ssh: явное подключение к недоступному серверу — сервер не выбран, без автоповторов', async () => {
+	mockState.prompts = [];
+	const port = await freePort();
+	const dead = new SshConnectionManager(store, 200);
+	const unreachable = { ...profile(), id: 'dead', name: 'dead', port };
+	await assert.rejects(() => dead.connect(unreachable));
+	assert.equal(dead.isConnected, false);
+	assert.equal(dead.displayProfile, undefined);
+	// Ошибку показывает команда подключения — повторного уведомления нет.
+	assert.equal(mockState.prompts.filter((message) => message.includes('недоступен')).length, 0);
+	// Повторных попыток нет: операция сразу падает.
+	await assert.rejects(() => dead.readdir('/site'));
+	await dead.disconnect();
+});
+
+test('ssh: сервер пропал — через окно попытки прекращаются, выбор снимается, есть уведомление', async () => {
+	const isolated = new TestSftpServer();
+	await isolated.start();
+	const port = isolated.port;
+	mockState.prompts = [];
+	const flaky = new SshConnectionManager(store, 250);
+	await flaky.connect({ ...profile(), id: 'flaky', name: 'flaky', port });
+	assert.equal(flaky.isConnected, true);
+
+	// Сервер закрылся: обрыв + недоступность для переподключения.
+	await isolated.close();
+	await new Promise((resolve) => setTimeout(resolve, 100));
+	await assert.rejects(() => flaky.readdir('/site'));
+
+	// Ждём окончания окна автопереподключения.
+	await new Promise((resolve) => setTimeout(resolve, 400));
+	assert.equal(flaky.isConnected, false);
+	assert.equal(flaky.displayProfile, undefined);
+	assert.ok(
+		mockState.prompts.some((message) => message.includes('недоступен') && message.includes('flaky')),
+		'пользователь должен получить уведомление об остановке автоподключения',
+	);
+	// Дальше — только явный выбор сервера.
+	await assert.rejects(() => flaky.readdir('/site'));
+	await flaky.disconnect();
+});

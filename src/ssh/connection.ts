@@ -78,6 +78,13 @@ function throttleStep(
 	};
 }
 
+/**
+ * Сколько ждём недоступный сервер, прежде чем прекратить автопереподключение.
+ * Дольше держать бессмысленно: пользователь уже понял, что связи нет, а каждая
+ * новая попытка — это ещё один SSH-хендшейк и «переподключение…» в статус-баре.
+ */
+export const RECONNECT_WINDOW_MS = 20_000;
+
 /** Одно активное SSH-подключение (MVP): sftp-канал + сериализация запросов. */
 export class SshConnectionManager implements vscode.Disposable {
 	private active?: ActiveConnection;
@@ -85,10 +92,18 @@ export class SshConnectionManager implements vscode.Disposable {
 	private lastProfile?: SshProfile;
 	private reconnect?: Promise<void>;
 	private dead = false;
+	/** Автопереподключение прекращено: ждём явного выбора сервера пользователем. */
+	private stopped = false;
+	/** До какого момента (ms) ещё пытаемся поднять соединение сами. */
+	private reconnectDeadline = 0;
+	private reconnectTimer?: NodeJS.Timeout;
 	private readonly changed = new vscode.EventEmitter<void>();
 	readonly onDidChangeConnection = this.changed.event;
 
-	constructor(private readonly store: ProfileStore) {}
+	constructor(
+		private readonly store: ProfileStore,
+		private readonly reconnectWindowMs = RECONNECT_WINDOW_MS,
+	) {}
 
 	get activeProfile(): SshProfile | undefined {
 		return this.active?.profile;
@@ -113,11 +128,20 @@ export class SshConnectionManager implements vscode.Disposable {
 			return;
 		}
 		await this.disconnect();
+		// Явный выбор сервера снимает прошлую «сдачу» и открывает новое окно попыток.
+		this.stopped = false;
+		this.resetReconnectWindow();
 		this.lastProfile = profile;
 		this.pending = this.doConnect(profile).finally(() => {
 			this.pending = undefined;
 		});
-		await this.pending;
+		try {
+			await this.pending;
+		} catch (err) {
+			// Подключиться не вышло: сервер снова считается невыбранным, автоповторов нет.
+			this.stopAutoReconnect(profile.name, false);
+			throw err;
+		}
 	}
 
 	private async doConnect(profile: SshProfile): Promise<void> {
@@ -133,7 +157,9 @@ export class SshConnectionManager implements vscode.Disposable {
 			this.changed.fire();
 			// Сервер сам закрыл простаивающую сессию — поднимаем её сразу, чтобы
 			// следующая загрузка не ждала рукопожатия, а статус-бар не мигал
-			// «сервер не выбран».
+			// «сервер не выбран». Если сервер не отвечает дольше окна, попытки
+			// прекращаются и профиль сбрасывается.
+			this.beginReconnectWindow();
 			this.warmUp();
 		});
 		const sftp = await new Promise<SFTPWrapper>((resolve, reject) => {
@@ -145,18 +171,83 @@ export class SshConnectionManager implements vscode.Disposable {
 				resolve(channel);
 			});
 		});
+		if (this.stopped) {
+			// Пока шло рукопожатие, окно истекло — соединение уже никому не нужно.
+			client.end();
+			throw new Error('SSH: автоподключение остановлено — выберите сервер');
+		}
 		this.active = { profile, client, sftp };
+		this.stopped = false;
 		this.dead = false;
+		this.resetReconnectWindow();
 		this.changed.fire();
 		log().info(`SSH подключён: ${profile.username}@${profile.host}:${profile.port} (${profile.remoteRoot})`);
 	}
 
 	/** Фоновое переподключение без запроса от операции (после обрыва/idle-таймаута). */
 	private warmUp(): void {
-		if (!this.lastProfile || this.active || this.reconnect) {
+		if (this.stopped || !this.lastProfile || this.active || this.reconnect) {
 			return;
 		}
 		void this.channel().catch((err) => log().debug(`SSH: фоновое переподключение не удалось: ${errorMessage(err)}`));
+	}
+
+	/**
+	 * Начинает (или продолжает) окно автоматических попыток. Окно одно на всю
+	 * серию обрывов: 20 секунд с первого обрыва, а не с каждой попытки.
+	 */
+	private beginReconnectWindow(): void {
+		if (this.stopped || this.reconnectDeadline !== 0 || this.reconnectTimer) {
+			return;
+		}
+		this.reconnectDeadline = Date.now() + this.reconnectWindowMs;
+		this.reconnectTimer = setTimeout(() => this.stopAutoReconnect(this.lastProfile?.name), this.reconnectWindowMs);
+		this.reconnectTimer.unref?.();
+	}
+
+	/**
+	 * Сервер недоступен дольше окна: прекращаем попытки, снимаем выбор сервера
+	 * и говорим об этом пользователю. Дальше — только явный выбор из статус-бара.
+	 */
+	private stopAutoReconnect(profileName?: string, notify = true): void {
+		if (this.active) {
+			// Соединение всё-таки поднялось раньше таймера.
+			this.resetReconnectWindow();
+			return;
+		}
+		const hadProfile = Boolean(this.lastProfile);
+		this.stopped = true;
+		this.dead = true;
+		this.active = undefined;
+		this.lastProfile = undefined;
+		this.resetReconnectWindow();
+		this.changed.fire();
+		const who = profileName ? `«${profileName}»` : 'сервер';
+		log().warn(
+			`SSH: ${who} недоступен ${Math.round(this.reconnectWindowMs / 1000)} с — автопереподключение остановлено`,
+		);
+		if (!hadProfile || !notify) {
+			return;
+		}
+		void vscode.window
+			.showWarningMessage(
+				`Bitrix Assistant: ${who} недоступен больше ${Math.round(this.reconnectWindowMs / 1000)} секунд. ` +
+					'Автоподключение остановлено, сервер не выбран.',
+				'Выбрать сервер',
+			)
+			.then((choice) => {
+				if (choice) {
+					void vscode.commands.executeCommand('bitrix.ssh.switchProfile');
+				}
+			});
+	}
+
+	private resetReconnectWindow(): void {
+		this.reconnectDeadline = 0;
+		if (this.reconnectTimer) {
+			clearTimeout(this.reconnectTimer);
+			this.reconnectTimer = undefined;
+		}
 	}
 
 
@@ -264,6 +355,9 @@ export class SshConnectionManager implements vscode.Disposable {
 
 	async disconnect(): Promise<void> {
 		this.lastProfile = undefined;
+		// Явное отключение — это тоже «сервер не выбран»: автоповторов быть не должно.
+		this.stopped = true;
+		this.resetReconnectWindow();
 		if (this.pending) {
 			await this.pending.catch(() => undefined);
 		}
@@ -282,10 +376,20 @@ export class SshConnectionManager implements vscode.Disposable {
 		if (current) {
 			return current.sftp;
 		}
+		if (this.stopped) {
+			throw new Error('Нет активного SSH-подключения');
+		}
+		// Таймер мог не сработать вовремя (занятый event loop) — проверяем дедлайн сами.
+		if (this.reconnectDeadline !== 0 && Date.now() >= this.reconnectDeadline) {
+			this.stopAutoReconnect(this.lastProfile?.name);
+			throw new Error('Нет активного SSH-подключения');
+		}
 		const profile = this.lastProfile;
 		if (!profile) {
 			throw new Error('Нет активного SSH-подключения');
 		}
+		// Окно 20 с: если сервер всё это время недоступен, попытки прекращаются.
+		this.beginReconnectWindow();
 		if (!this.reconnect) {
 			this.reconnect = this.doConnect(profile)
 				.catch((err) => {
@@ -483,6 +587,7 @@ export class SshConnectionManager implements vscode.Disposable {
 	}
 
 	dispose(): void {
+		this.resetReconnectWindow();
 		const active = this.active;
 		this.active = undefined;
 		active?.client.end();

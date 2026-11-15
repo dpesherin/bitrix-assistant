@@ -107,6 +107,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<Active
 		phpSyntax,
 	);
 	await vscode.commands.executeCommand('setContext', 'bitrix.sshConnected', false);
+	// Контекст меню «загрузить/скачать» должен следовать за фактическим
+	// состоянием: после обрыва и остановки автоподключения он сбрасывается.
+	context.subscriptions.push(
+		connections.onDidChangeConnection(() => {
+			void vscode.commands.executeCommand('setContext', 'bitrix.sshConnected', connections.isConnected);
+		}),
+	);
 
 	// Встроен только PHP 8.4: если для проекта выбрана другая версия и её нет
 	// ни в PATH, ни в сохранённом пути, предлагаем скачать или указать путь.
