@@ -64,9 +64,29 @@ jobs:
           fi
           echo "Архитектура $actual ✓"
 
+      # doctor при --auto-fix тоже качает готовые артефакты с GitHub (например
+      # pkg-config) и без токена упирается в анонимный лимит API: spc показывает
+      # «Download artifact 'pkg-config' failed. Please check your internet connection»
+      # и завершается кодом 69. Поэтому токен и повторы — как у сборки ниже.
       - name: Check build environment
         shell: bash
-        run: ./spc doctor --auto-fix
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          for attempt in 1 2 3; do
+            echo "==> spc doctor --auto-fix, попытка $attempt"
+            if ./spc doctor --auto-fix; then
+              echo "Окружение готово"
+              exit 0
+            fi
+            if [[ "$attempt" -lt 3 ]]; then
+              echo "spc doctor не удался, повтор через $((attempt * 20)) c" >&2
+              sleep "$((attempt * 20))"
+            fi
+          done
+          echo "spc doctor не удался после 3 попыток" >&2
+          exit 1
 
       # pcntl и posix не поддерживаются в static-php-cli на Windows —
       # для win32-* убираем их из craft.yml (сервер их не использует).
