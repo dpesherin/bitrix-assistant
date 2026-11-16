@@ -100,28 +100,43 @@ jobs:
           fi
           grep -n '^extensions' craft.yml
 
-      # GitHub-hosted раннеры делят IP и упираются в анонимный лимит
-      # GitHub API, поэтому скачивание артефактов иногда падает (exit 75).
-      # Повторяем сборку несколько раз — spc кэширует уже скачанное.
+      # GitHub-hosted раннеры делят IP и упираются в лимиты: анонимный GitHub API
+      # (exit 75), а также php.net, который на `releases/index.php?json` иногда
+      # отдаёт HTML вместо JSON — spc отвечает «Invalid PHP release info
+      # received for version 8.4». Повторяем сборку несколько раз: spc кэширует
+      # уже скачанное, так что повтор не начинает с нуля.
       - name: Build PHP (craft.yml)
         shell: bash
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          for attempt in 1 2 3; do
+          for attempt in 1 2 3 4 5; do
             echo "==> Попытка сборки $attempt"
             if ./spc craft; then
               echo "Сборка удалась"
               exit 0
             fi
-            if [[ "$attempt" -lt 3 ]]; then
-              echo "Сборка не удалась, повтор через $((attempt * 20)) c" >&2
-              sleep "$((attempt * 20))"
+            if [[ "$attempt" -lt 5 ]]; then
+              echo "Сборка не удалась, повтор через $((attempt * 30)) c" >&2
+              sleep "$((attempt * 30))"
             fi
           done
-          echo "Сборка не удалась после 3 попыток" >&2
+          echo "Сборка не удалась после 5 попыток" >&2
           exit 1
+
+      # Если сборка всё же упала — в лог попадает то, что видит раннер: код
+      # ответа php.net и хвост вывода spc. Без этого причину не видно.
+      - name: Diagnostics on failure
+        if: failure()
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo "== php.net releases/index.php?json&version=8.4"
+          curl -sS -m 30 -o /dev/null -w "http_code=%{http_code} content_type=%{content_type} size=%{size_download}\n" \
+            "https://www.php.net/releases/index.php?json&version=8.4" || true
+          echo "== хвост spc.output.log"
+          tail -n 40 log/spc.output.log 2>/dev/null || true
 
       - name: Collect binary
         shell: bash
