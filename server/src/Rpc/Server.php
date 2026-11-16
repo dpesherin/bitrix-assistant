@@ -8,6 +8,7 @@ use BitrixLsp\Analyzer\JsAnalyzer\DocumentContextBuilder;
 use BitrixLsp\Analyzer\JsAnalyzer\JsCompletionProvider;
 use BitrixLsp\Analyzer\JsAnalyzer\JsDefinitionProvider;
 use BitrixLsp\Analyzer\JsAnalyzer\JsHoverProvider;
+use BitrixLsp\Analyzer\JsAnalyzer\JsInlayHintProvider;
 use BitrixLsp\Analyzer\JsAnalyzer\JsModuleResolver;
 use BitrixLsp\Analyzer\JsAnalyzer\JsSignatureHelpProvider;
 use BitrixLsp\Analyzer\JsAnalyzer\LibraryResolver;
@@ -60,6 +61,7 @@ final class Server
 	private readonly PhpFoldingProvider $phpFolding;
 	private readonly PhpTypeNavigation $phpNavigation;
 	private readonly PhpInlayHintProvider $phpInlayHints;
+	private readonly JsInlayHintProvider $jsInlayHints;
 	private readonly PhpRenameProvider $phpRename;
 	private readonly PhpCodeLensProvider $phpCodeLens;
 	private readonly PhpCallHierarchyProvider $phpCalls;
@@ -107,6 +109,7 @@ final class Server
 		$this->phpFolding = new PhpFoldingProvider();
 		$this->phpNavigation = new PhpTypeNavigation($this->repository, $methodResolver, $typeInference);
 		$this->phpInlayHints = new PhpInlayHintProvider($this->repository, $methodResolver);
+		$this->jsInlayHints = new JsInlayHintProvider($this->repository);
 		$this->phpRename = new PhpRenameProvider();
 		$this->phpCodeLens = new PhpCodeLensProvider($this->repository);
 		$this->phpCalls = new PhpCallHierarchyProvider($this->repository, $methodResolver);
@@ -715,11 +718,20 @@ final class Server
 	private function inlayHint(array $params): array
 	{
 		$document = $this->document($params);
-		if ($document === null || $document->languageId !== 'php') {
+		if ($document === null) {
 			return [];
 		}
 		$range = is_array($params['range'] ?? null) ? $params['range'] : [];
-		return $this->phpInlayHints->provide($document, $range);
+		if ($document->languageId === 'php') {
+			return $this->phpInlayHints->provide($document, $range);
+		}
+		if (in_array($document->languageId, self::JS_LANGUAGES, true)) {
+			$hints = $this->jsInlayHints->provide($document, $range);
+			// Диагностика: видно, что JS-подсказки вообще запрашивались и что вернули.
+			$this->logger->info(sprintf('inlayHint: lang=%s hints=%d', $document->languageId, count($hints)));
+			return $hints;
+		}
+		return [];
 	}
 
 	/**
@@ -947,6 +959,23 @@ final class Server
 			return null;
 		}
 		$offset = $this->offset($document, $params);
+		// Диагностика: видно, дошёл ли запрос до сервера и что он вернул.
+		// Без этих строк невозможно понять, почему в редакторе нет подсказки.
+		$result = $this->signatureHelpFor($document, $offset);
+		$this->logger->info(sprintf(
+			'signatureHelp: lang=%s offset=%d %s',
+			$document->languageId,
+			$offset,
+			$result === null ? 'нет подсказки' : 'ok',
+		));
+		return $result;
+	}
+
+	/**
+	 * @return array<string, mixed>|null
+	 */
+	private function signatureHelpFor(TextDocument $document, int $offset): ?array
+	{
 		if ($document->languageId === 'php') {
 			$jsInline = !$this->isPhpContext($document->text, $offset)
 				&& $this->isJsContext($document->text, $offset);

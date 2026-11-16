@@ -40,6 +40,7 @@ final class PhpCompletionProvider
 	public function __construct(
 		private readonly Repository $repository,
 		private readonly PhpTypeInference $inference,
+		private readonly PhpSnippetProvider $snippets = new PhpSnippetProvider(),
 	) {
 	}
 
@@ -121,6 +122,11 @@ final class PhpCompletionProvider
 			}
 			if (preg_match('/(?:->|::|\\$|\b(?:new|function|class|interface|trait|enum|use|namespace|extends|implements|const|public|protected|private|static))$/i', $prior) !== 1) {
 				$items = $this->globalItems($document, $offset, $prefix);
+				// Конструкции языка (`if`, `foreach`, `switch`…) предлагаем только
+				// в начале инструкции — и сразу готовым сниппетом с фигурными скобками.
+				if ($this->atStatementStart($prior)) {
+					$items = array_merge($this->snippets->items($document, $offset, $prefix), $items);
+				}
 				// `str_con_`: точных совпадений нет. Чтобы виджет не показывал
 				// залипший старый список, отдаём ближайший валидный префикс,
 				// растянув filterText и диапазон на весь введённый текст.
@@ -149,6 +155,23 @@ final class PhpCompletionProvider
 		// (src/features/phpClassCompletion.ts): он умеет вставлять `use`
 		// и не конфликтует с определением слова в PHP (обратный слэш).
 		return [];
+	}
+
+	/**
+	 * Позиция начала инструкции — только здесь предлагаем конструкции языка.
+	 * `:` из типа возврата (`function f(): Foo`) и тернарника сюда не попадает:
+	 * ветка `case`/`default` проверяется отдельно.
+	 */
+	private function atStatementStart(string $prior): bool
+	{
+		$text = rtrim($prior);
+		if ($text === '') {
+			return true;
+		}
+		if (preg_match('/(?:[;{}]|<\?(?:php|=)?)$/i', $text) === 1) {
+			return true;
+		}
+		return preg_match('/(?:\bcase\s+[^:;{}]+|\bdefault)\s*:$/i', $text) === 1;
 	}
 
 	/**

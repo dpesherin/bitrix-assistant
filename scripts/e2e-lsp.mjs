@@ -1939,6 +1939,170 @@ check(
 	fluentLabels.includes('setSelect') && fluentLabels.includes('where') && fluentLabels.includes('fetchAll'),
 	'PHP: completion в многострочной fluent-цепочке query()->setSelect()->where()->',
 );
+
+// Конструкции PHP вставляются готовым сниппетом: `foreach (...) { ... }`.
+const snippetText = '<?php\nfunction run(array $items)\n{\n    fore\n}\n';
+const snippetUri = pathToFileURL(path.join(site, 'local/php_interface/snippet.php')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: snippetUri, languageId: 'php', version: 1, text: snippetText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === snippetUri);
+const snippetRequest = request('textDocument/completion', {
+	textDocument: { uri: snippetUri },
+	position: positionAt(snippetText, snippetText.indexOf('fore') + 'fore'.length),
+});
+send(snippetRequest);
+const snippetCompletion = await waitFor((message) => message.id === snippetRequest.id);
+const snippetItem = (Array.isArray(snippetCompletion.result) ? snippetCompletion.result : []).find((item) => item.label === 'foreach');
+check(
+	Boolean(snippetItem) && String(snippetItem.textEdit?.newText ?? '').includes('{\n'),
+	'PHP: foreach подсказывается готовой конструкцией с фигурными скобками',
+);
+
+// JS: встроенные объекты, их подписи параметров и методы на литералах.
+const nativeText = ['JSON.stringify({ a: 1 });', 'JSON.', "'abc'.replace("].join('\n');
+const nativeUri = pathToFileURL(path.join(site, 'local/js/app/native.js')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: nativeUri, languageId: 'javascript', version: 1, text: nativeText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === nativeUri);
+const jsonCompletionRequest = request('textDocument/completion', {
+	textDocument: { uri: nativeUri },
+	position: positionAt(nativeText, nativeText.indexOf('JSON.') + 'JSON.'.length),
+});
+send(jsonCompletionRequest);
+const jsonCompletion = await waitFor((message) => message.id === jsonCompletionRequest.id);
+check(
+	(Array.isArray(jsonCompletion.result) ? jsonCompletion.result : []).some((item) => item.label === 'stringify'),
+	'JS: completion после JSON. → stringify',
+);
+
+const jsonSignatureRequest = request('textDocument/signatureHelp', {
+	textDocument: { uri: nativeUri },
+	position: positionAt(nativeText, nativeText.indexOf('JSON.stringify(') + 'JSON.stringify('.length),
+});
+send(jsonSignatureRequest);
+const jsonSignature = await waitFor((message) => message.id === jsonSignatureRequest.id);
+check(
+	String(jsonSignature.result?.signatures?.[0]?.label ?? '').includes('value'),
+	'JS: подпись параметров у JSON.stringify(',
+);
+
+const literalSignatureRequest = request('textDocument/signatureHelp', {
+	textDocument: { uri: nativeUri },
+	position: positionAt(nativeText, nativeText.indexOf("'abc'.replace(") + "'abc'.replace(".length),
+});
+send(literalSignatureRequest);
+const literalSignature = await waitFor((message) => message.id === literalSignatureRequest.id);
+check(
+	String(literalSignature.result?.signatures?.[0]?.label ?? '').includes('replaceValue'),
+	"JS: подпись параметров у 'строка'.replace(",
+);
+
+const elementText = "document.querySelector('.x').";
+const elementUri = pathToFileURL(path.join(site, 'local/js/app/element.js')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: elementUri, languageId: 'javascript', version: 1, text: elementText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === elementUri);
+const elementRequest = request('textDocument/completion', {
+	textDocument: { uri: elementUri },
+	position: positionAt(elementText, elementText.length),
+});
+send(elementRequest);
+const elementCompletion = await waitFor((message) => message.id === elementRequest.id);
+check(
+	(Array.isArray(elementCompletion.result) ? elementCompletion.result : []).some((item) => item.label === 'addEventListener'),
+	'JS: completion после document.querySelector(...). → методы элемента',
+);
+
+const localFnText = 'function showUser(id, role) {}\nshowUser(';
+const localFnUri = pathToFileURL(path.join(site, 'local/js/app/localfn.js')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: localFnUri, languageId: 'javascript', version: 1, text: localFnText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === localFnUri);
+const localFnRequest = request('textDocument/signatureHelp', {
+	textDocument: { uri: localFnUri },
+	position: positionAt(localFnText, localFnText.length),
+});
+send(localFnRequest);
+const localFnSignature = await waitFor((message) => message.id === localFnRequest.id);
+check(
+	String(localFnSignature.result?.signatures?.[0]?.label ?? '') === 'showUser(id, role)',
+	'JS: подпись параметров у функции из этого же файла',
+);
+
+// DOM-переменная: `const el = document.createElement(...)` → методы элемента.
+const domText = "const overlay = document.createElement('div');\noverlay.";
+const domUri = pathToFileURL(path.join(site, 'local/js/app/dom.js')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: domUri, languageId: 'javascript', version: 1, text: domText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === domUri);
+const domCompletionRequest = request('textDocument/completion', {
+	textDocument: { uri: domUri },
+	position: positionAt(domText, domText.length),
+});
+send(domCompletionRequest);
+const domCompletion = await waitFor((message) => message.id === domCompletionRequest.id);
+check(
+	(Array.isArray(domCompletion.result) ? domCompletion.result : []).some((item) => item.label === 'setAttribute'),
+	'JS: completion после переменной-элемента (document.createElement)',
+);
+
+const domSigText = "const overlay = document.createElement('div');\noverlay.setAttribute(";
+const domSigUri = pathToFileURL(path.join(site, 'local/js/app/dom-sig.js')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: domSigUri, languageId: 'javascript', version: 1, text: domSigText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === domSigUri);
+const domSigRequest = request('textDocument/signatureHelp', {
+	textDocument: { uri: domSigUri },
+	position: positionAt(domSigText, domSigText.length),
+});
+send(domSigRequest);
+const domSig = await waitFor((message) => message.id === domSigRequest.id);
+check(
+	String(domSig.result?.signatures?.[0]?.label ?? '') === 'setAttribute(name: string, value: string)',
+	'JS: подпись параметров у overlay.setAttribute(',
+);
+
+// Inlay hints: имена параметров прямо в вызове (как в PHP).
+const inlayText = "const overlay = document.createElement('div');\noverlay.setAttribute('role', 'alertdialog');\n";
+const inlayUri = pathToFileURL(path.join(site, 'local/js/app/inlay.js')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: inlayUri, languageId: 'javascript', version: 1, text: inlayText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === inlayUri);
+const inlayRequest = request('textDocument/inlayHint', {
+	textDocument: { uri: inlayUri },
+	range: {
+		start: { line: 0, character: 0 },
+		end: { line: 2, character: 0 },
+	},
+});
+send(inlayRequest);
+const inlay = await waitFor((message) => message.id === inlayRequest.id);
+const inlayLabels = (Array.isArray(inlay.result) ? inlay.result : []).map((hint) => String(hint.label ?? '').trim());
+check(
+	inlayLabels.includes('name:') && inlayLabels.includes('value:'),
+	'JS: inlay hints с именами параметров в overlay.setAttribute(',
+);
 const membersText = '<?php\nnamespace Vendor\\Demo;\nclass HoverMembers\n{\n    private const LIMIT = 10;\n    private ?string $cache;\n}\n';
 const membersUri = pathToFileURL(membersPath).toString();
 send({

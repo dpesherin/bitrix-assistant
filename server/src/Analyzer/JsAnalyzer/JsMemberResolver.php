@@ -22,6 +22,14 @@ final class JsMemberResolver
 	/**
 	 * @return array{kind: 'index', row: array<string, mixed>}|array{kind: 'native', data: array<string, mixed>}|null
 	 */
+	/**
+	 * Встроенный тип переменной (`element`, `jquery`) по её объявлению.
+	 */
+	public function nativeOwnerForVariable(TextDocument $document, string $variable, int $offset): ?string
+	{
+		return $this->types->nativeOwnerForVariable($document, $variable, $offset);
+	}
+
 	public function resolve(TextDocument $document, int $offset, string $method): ?array
 	{
 		$method = trim($method);

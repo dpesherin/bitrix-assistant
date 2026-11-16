@@ -46,6 +46,10 @@ final class PhpKeywordHover
 			'signature' => 'switch ($value) { case ...: ...; default: ...; }',
 			'description' => 'Сравнивает значение с вариантами `case`; не забывайте про `break`.',
 		],
+		'case' => [
+			'signature' => 'case value: ... break;',
+			'description' => 'Ветка `switch`: выполняется, если значение совпало. `break` завершает ветку.',
+		],
 		'match' => [
 			'signature' => 'match ($value) { 1 => ..., default => ... }',
 			'description' => 'Выражение сопоставления, появилось в PHP 8.0. Возвращает значение ветки.',
@@ -226,6 +230,24 @@ final class PhpKeywordHover
 		if ($info === null) {
 			return null;
 		}
+		return [
+			'contents' => (array) self::describe($keyword),
+			'range' => $document->range($token['start'], $token['end']),
+		];
+	}
+
+	/**
+	 * Описание конструкции для подсказки в списке автодополнения.
+	 *
+	 * @return array{kind: string, value: string}|null
+	 */
+	public static function describe(string $keyword): ?array
+	{
+		$keyword = strtolower($keyword);
+		$info = self::KEYWORDS[$keyword] ?? null;
+		if ($info === null) {
+			return null;
+		}
 		$lines = [
 			HoverColor::span($keyword, 'keyword'),
 			'`конструкция языка PHP`',
@@ -235,9 +257,6 @@ final class PhpKeywordHover
 		if (!empty($info['example'])) {
 			$lines[] = "**Пример**\n\n```php\n{$info['example']}\n```";
 		}
-		return [
-			'contents' => ['kind' => 'markdown', 'value' => implode("\n\n", $lines)],
-			'range' => $document->range($token['start'], $token['end']),
-		];
+		return ['kind' => 'markdown', 'value' => implode("\n\n", $lines)];
 	}
 }

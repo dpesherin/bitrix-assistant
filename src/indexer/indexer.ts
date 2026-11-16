@@ -650,6 +650,10 @@ export class BitrixIndexer implements vscode.Disposable {
 			// Легаси-ядро: CFile, CMain, CUser и другие классы из classes/general,
 			// classes/mysql, classes/pgsql.
 			roots.push(path.join(dir, 'classes'));
+			// ORM-аннотации ядра: `EO_*_Query`, `EO_*_Collection` и прочие классы
+			// сущностей объявлены здесь, а не в lib. Без них `Table::query()`
+			// не продолжается дальше первого шага: тип возврата не находится.
+			roots.push(path.join(dir, 'meta'));
 			roots.push(path.join(dir, 'install', 'components'));
 			roots.push(path.join(dir, 'install', 'classes'));
 			// Админские страницы: там объявлены глобальные хелперы вида
@@ -659,6 +663,7 @@ export class BitrixIndexer implements vscode.Disposable {
 		for (const dir of listDirectories(path.join(layout.localDir, 'modules'))) {
 			roots.push(path.join(dir, 'lib'));
 			roots.push(path.join(dir, 'classes'));
+			roots.push(path.join(dir, 'meta'));
 			roots.push(path.join(dir, 'tools.php'), path.join(dir, 'include.php'));
 		}
 		// PHP-файлы прямо в каталоге модуля: functions.php, options.php, default_option.php

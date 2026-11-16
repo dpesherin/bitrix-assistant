@@ -60,6 +60,40 @@ final class JsCompletionProvider
 				return $items;
 			}
 		}
+		// Встроенные объекты: `JSON.`, `Math.`, `console.`, `Object.`, `Promise.`…
+		// Раньше стандартные методы не подсказывались вовсе: анализатор знал
+		// только индекс проекта и модули.
+		if (
+			preg_match('/(?<![\w$.])([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)?$/', $before, $native) === 1 &&
+			JsNativeCatalog::isNamespace($native[1])
+		) {
+			return $this->nativeItems($document, $offset, $native[2] ?? '', JsNativeCatalog::namespaceMembers($native[1]));
+		}
+		// DOM: `document.` — методы документа и элемента.
+		if (preg_match('/(?<![\w$.])(document|window)\.([A-Za-z_$][\w$]*)?$/', $before, $dom) === 1) {
+			return $this->nativeItems($document, $offset, $dom[2] ?? '', JsNativeCatalog::domMembers('document'));
+		}
+		// Результат DOM-вызова: `document.querySelector('…').` — это элемент,
+		// поэтому подсказываем его методы, а не методы документа.
+		if (
+			preg_match(
+				'/(?:document|window)\s*\.\s*(?:querySelector|getElementById)\s*\([^()]*\)\s*\.\s*([A-Za-z_$][\w$]*)?$/',
+				$before,
+				$domCall,
+			) === 1
+		) {
+			return $this->nativeItems($document, $offset, $domCall[1] ?? '', JsNativeCatalog::domMembers('element'));
+		}
+		// jQuery-объект: `$('.x').` и `$(document).` — методы jQuery.
+		if (preg_match('/(?:\$|jQuery)\s*\([^()]*\)\s*\.\s*([A-Za-z_$][\w$]*)?$/', $before, $jquery) === 1) {
+			return $this->nativeItems($document, $offset, $jquery[1] ?? '', JsNativeCatalog::prototypeMembers('jquery'));
+		}
+		// Литералы: `'строка'.`, `[...].`, число — методы прототипа.
+		$literalType = $this->literalReceiverType($before);
+		if ($literalType !== null) {
+			preg_match('/\.\s*([A-Za-z_$][\w$]*)?$/', $before, $literalMatch);
+			return $this->nativeItems($document, $offset, $literalMatch[1] ?? '', JsNativeCatalog::prototypeMembers($literalType));
+		}
 		if (
 			preg_match('/([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)?$/', $before, $memberMatch) === 1 &&
 			$memberMatch[1] !== 'this' &&
@@ -72,6 +106,18 @@ final class JsCompletionProvider
 			$class = $this->types->classForVariable($document, $memberMatch[1], $offset);
 			if ($class !== null) {
 				$items = $this->indexedMemberItems($document, $offset, $class, $memberMatch[2] ?? '');
+				if ($items !== []) {
+					return $items;
+				}
+			}
+			// `const el = document.createElement('div')` → у переменной методы элемента,
+			// `const $el = $('.x')` → методы jQuery. В индекс такие значения не попадают.
+			$nativeOwner = $this->types->nativeOwnerForVariable($document, $memberMatch[1], $offset);
+			if ($nativeOwner !== null) {
+				$members = $nativeOwner === 'jquery'
+					? JsNativeCatalog::prototypeMembers('jquery')
+					: JsNativeCatalog::domMembers('element');
+				$items = $this->nativeItems($document, $offset, $memberMatch[2] ?? '', $members);
 				if ($items !== []) {
 					return $items;
 				}
@@ -206,6 +252,23 @@ final class JsCompletionProvider
 				'filterText' => $name,
 				'sortText' => '0_' . strtolower($name),
 				'textEdit' => ['range' => $range, 'newText' => $name],
+			];
+		}
+		// Встроенные имена: `JSON`, `Math`, `console`, `parseInt`, `setTimeout`.
+		// Без них стандартные функции не находились: список знал только проект.
+		foreach (JsNativeCatalog::globalNames() as $name) {
+			if (isset($names[$name]) || ($prefix !== '' && stripos($name, $prefix) !== 0)) {
+				continue;
+			}
+			$isObject = JsNativeCatalog::isNamespace($name);
+			$items[] = [
+				'label' => $name,
+				'kind' => $isObject ? 9 : 3,
+				'detail' => $isObject ? 'встроенный объект' : 'встроенная функция',
+				'filterText' => $name,
+				'sortText' => '1_' . strtolower($name),
+				'textEdit' => ['range' => $range, 'newText' => $isObject ? $name : $name . '($0)'],
+				'insertTextFormat' => $isObject ? 1 : 2,
 			];
 		}
 		usort($items, static fn (array $a, array $b): int => strcmp((string) $a['sortText'], (string) $b['sortText']));
@@ -488,4 +551,61 @@ final class JsCompletionProvider
 		return $items;
 	}
 
+	/**
+	 * Подсказка для встроенного метода: подпись, описание и вставка вызова
+	 * со скобками, чтобы после выбора сразу можно было писать аргументы.
+	 *
+	 * @param array<string, array<string, mixed>> $members
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function nativeItems(TextDocument $document, int $offset, string $prefix, array $members): array
+	{
+		if ($members === []) {
+			return [];
+		}
+		$range = $document->range($offset - strlen($prefix), $offset);
+		$items = [];
+		foreach ($members as $name => $member) {
+			if ($prefix !== '' && stripos($name, $prefix) !== 0) {
+				continue;
+			}
+			$owner = (string) ($member['owner'] ?? '');
+			$signature = (string) ($member['signature'] ?? $name);
+			$value = "```ts\n" . ($owner !== '' ? $owner . '.' : '') . $signature . "\n```";
+			$doc = trim((string) ($member['doc'] ?? ''));
+			if ($doc !== '') {
+				$value .= "\n\n" . $doc;
+			}
+			$items[] = [
+				'label' => $name,
+				'kind' => 2,
+				'detail' => $owner !== '' ? $owner : 'встроенный метод',
+				'labelDetails' => ['detail' => '()'],
+				'filterText' => $name,
+				'sortText' => '1_' . strtolower($name),
+				'textEdit' => ['range' => $range, 'newText' => $name . '($0)'],
+				'insertTextFormat' => 2,
+				'documentation' => ['kind' => 'markdown', 'value' => $value],
+			];
+		}
+		return $items;
+	}
+
+	/**
+	 * Тип получателя, если перед точкой стоит литерал: `'строка'.`, `[...].`, `42.`
+	 * (в маске строки уже без содержимого, кавычки остались).
+	 */
+	private function literalReceiverType(string $before): ?string
+	{
+		if (preg_match('/([\'`"])[^\'`"]*\1\s*\.\s*([A-Za-z_$][\w$]*)?$/', $before) === 1) {
+			return 'string';
+		}
+		if (preg_match('/(?<![\w$)\]])\[[^\[\]]*\]\s*\.\s*[A-Za-z_$][\w$]*$/', $before) === 1) {
+			return 'array';
+		}
+		if (preg_match('/(?<![\w$.])\d+(?:\.\d+)?\s*\.\s*[A-Za-z_$][\w$]*$/', $before) === 1) {
+			return 'number';
+		}
+		return null;
+	}
 }

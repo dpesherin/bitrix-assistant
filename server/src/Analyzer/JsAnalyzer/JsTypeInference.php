@@ -58,6 +58,52 @@ final class JsTypeInference
 		return $this->resolveName($document, $class);
 	}
 
+	/**
+	 * Тип-«владелец» для встроенных объектов по правой части объявления:
+	 * `const el = document.createElement('div')` → `element`,
+	 * `const $el = $('.x')` → `jquery`.
+	 *
+	 * Нужно, чтобы после переменной подсказывались методы элемента, а не
+	 * пустой список: в индекс такие значения не попадают.
+	 */
+	public function nativeOwnerForVariable(TextDocument $document, string $variable, int $offset): ?string
+	{
+		if ($variable === '' || $variable === 'this') {
+			return null;
+		}
+		$pattern = '/\b(?:const|let|var)\s+' . preg_quote($variable, '/') . '\s*=\s*([^;\n]+)/';
+		if (preg_match_all($pattern, $document->text, $matches, PREG_OFFSET_CAPTURE) === false) {
+			return null;
+		}
+		$expression = null;
+		foreach ($matches[0] as $index => $match) {
+			if ($match[1] >= $offset) {
+				break;
+			}
+			$expression = $matches[1][$index][0] ?? null;
+		}
+		return $expression === null ? null : self::nativeOwnerFromExpression($expression);
+	}
+
+	/** Что за объект создаёт выражение: элемент DOM или jQuery-набор. */
+	private static function nativeOwnerFromExpression(string $expression): ?string
+	{
+		$expression = trim($expression);
+		if ($expression === '') {
+			return null;
+		}
+		if (preg_match('/^(?:\$|jQuery)\s*\(/', $expression) === 1) {
+			return 'jquery';
+		}
+		if (preg_match('/^document\s*\.\s*(?:createElement|createElementNS|createTextNode|createDocumentFragment|querySelector|getElementById)\s*\(/', $expression) === 1) {
+			return 'element';
+		}
+		if (preg_match('/^document\s*\.\s*(?:body|documentElement)\b/', $expression) === 1) {
+			return 'element';
+		}
+		return null;
+	}
+
 	/** `const x = createFoo()` → `@returns {Foo}` из индекса. */
 	private function classFromFactoryCall(TextDocument $document, string $variable, int $offset): ?string
 	{
