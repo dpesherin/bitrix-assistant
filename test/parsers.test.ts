@@ -37,6 +37,59 @@ class Context
 	assert.equal(method?.returnType, 'Request | HttpRequest');
 });
 
+test('PHP: fluent-цепочка — @return $this и @method $this сохраняются', () => {
+	const php = `<?php
+namespace Bitrix\\Main\\ORM\\Query;
+
+/**
+ * @method $this where(...$filter)
+ */
+class Query
+{
+	/**
+	 * @return $this
+	 */
+	public function setSelect(array $select)
+	{
+		return $this;
+	}
+}`;
+	const parsed = parsePhpFile(php);
+	const cls = parsed.classes[0];
+	assert.equal(cls.methods.find((item) => item.name === 'setSelect')?.returnType, '$this');
+	// Без `$` в типе аннотация отбрасывалась целиком: `where()` не попадал в индекс.
+	assert.equal(cls.methods.find((item) => item.name === 'where')?.returnType, '$this');
+});
+
+test('PHP: несколько namespace в одном файле (мета-файлы ядра)', () => {
+	const php = `<?php
+namespace Vendor\\First {
+	class Alpha extends \\Vendor\\Base\\ParentOne {}
+}
+namespace Vendor\\Second {
+	use Vendor\\Base\\ParentTwo;
+
+	/**
+	 * @method static EO_Beta_Query query()
+	 */
+	class Beta extends ParentTwo {}
+}
+namespace Vendor\\Third;
+class Gamma {}
+`;
+	const parsed = parsePhpFile(php);
+	assert.deepEqual(
+		parsed.classes.map((item) => [item.fqcn, item.extends]),
+		[
+			['Vendor\\First\\Alpha', 'Vendor\\Base\\ParentOne'],
+			['Vendor\\Second\\Beta', 'Vendor\\Base\\ParentTwo'],
+			['Vendor\\Third\\Gamma', undefined],
+		],
+	);
+	// `@method` из докблока класса по-прежнему попадает в методы.
+	assert.equal(parsed.classes[1].methods.find((item) => item.name === 'query')?.returnType, 'EO_Beta_Query');
+});
+
 test('PHP: трейты и родители резолвятся через use-импорты', () => {
 	const php = `<?php
 namespace Vendor\\Biconnector;

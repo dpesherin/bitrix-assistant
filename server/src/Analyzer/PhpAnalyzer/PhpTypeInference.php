@@ -682,6 +682,12 @@ final class PhpTypeInference
 				continue;
 			}
 			$lower = strtolower($part);
+			// `@return $this` — fluent-метод ORM-цепочки (`setSelect()`, `where()`)
+			// возвращает тот же объект, поэтому тип остаётся прежним.
+			if ($lower === '$this') {
+				$result[] = $declaringClass;
+				continue;
+			}
 			if ($lower === 'self' || $lower === 'static') {
 				$result[] = $declaringClass;
 				continue;

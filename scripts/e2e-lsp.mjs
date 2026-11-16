@@ -624,6 +624,76 @@ insertGlobal(
 	17,
 );
 
+// Fluent-цепочка Bitrix ORM: `query()->setSelect()->where()->fetchAll()`.
+// `setSelect()`/`where()` возвращают `$this` (where — через `@method` класса),
+// поэтому подсказки должны идти дальше по цепочке, в том числе с переносом строк.
+const ormTablePath = path.join(site, 'local/php_interface/orm_table.php');
+const ormQueryPath = path.join(site, 'local/php_interface/orm_query.php');
+mkdirSync(path.dirname(ormTablePath), { recursive: true });
+writeFileSync(
+	ormTablePath,
+	['<?php', 'namespace Vendor\\Demo;', '', 'use Vendor\\Demo\\OrmQuery;', '', 'class OrmTable', '{', '    /** @return OrmQuery */', '    public static function query() {}', '}', ''].join('\n'),
+);
+writeFileSync(
+	ormQueryPath,
+	[
+		'<?php',
+		'namespace Vendor\\Demo;',
+		'',
+		'/** @method $this where(...$filter) */',
+		'class OrmQuery',
+		'{',
+		'    /** @return $this */',
+		'    public function setSelect(array $select) {}',
+		'',
+		'    /** @return array */',
+		'    public function fetchAll() { return []; }',
+		'}',
+		'',
+	].join('\n'),
+);
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line) VALUES (?,?,?,?,?,?,?)',
+	'Vendor\\Demo\\OrmTable',
+	'OrmTable',
+	'Vendor\\Demo',
+	'class',
+	'demo',
+	ormTablePath,
+	6,
+);
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line) VALUES (?,?,?,?,?,?,?)',
+	'Vendor\\Demo\\OrmQuery',
+	'OrmQuery',
+	'Vendor\\Demo',
+	'class',
+	'demo',
+	ormQueryPath,
+	5,
+);
+for (const [name, signature, returnType, isStatic, line] of [
+	['query', 'query()', 'OrmQuery', 1, 9],
+	['setSelect', 'setSelect(array $select)', '$this', 0, 8],
+	['where', 'where(...$filter)', '$this', 0, 4],
+	['fetchAll', 'fetchAll()', 'array', 0, 11],
+]) {
+	insertGlobal(
+		'INSERT INTO methods (class_fqcn, name, signature, return_type, params_json, is_static, visibility, file, line, doc) VALUES (?,?,?,?,?,?,?,?,?,?)',
+		name === 'query' ? 'Vendor\\Demo\\OrmTable' : 'Vendor\\Demo\\OrmQuery',
+		name,
+		signature,
+		returnType,
+		'[]',
+		isStatic,
+		'public',
+		name === 'query' ? ormTablePath : ormQueryPath,
+		line,
+		null,
+	);
+}
+const ormUsagePath = path.join(site, 'local/php_interface/orm_usage.php');
+
 const membersPath = path.join(site, 'local/php_interface/members.php');
 insertGlobal(
 	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line) VALUES (?,?,?,?,?,?,?)',
@@ -1840,6 +1910,34 @@ console.log('DEBUG chaincomp', JSON.stringify(chainCompletion));
 check(
 	Array.isArray(chainCompletion.result) && chainCompletion.result.some((item) => item.label === 'getFactory'),
 	'PHP: completion в цепочке getInstance()->getF',
+);
+
+const fluentText = [
+	'<?php',
+	'use Vendor\\Demo\\OrmTable;',
+	'',
+	'$rows = OrmTable::query()',
+	"    ->setSelect(['ID'])",
+	"    ->where('ID', '=', 1)",
+	'    ->',
+].join('\n');
+const fluentUri = pathToFileURL(ormUsagePath).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: fluentUri, languageId: 'php', version: 1, text: fluentText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === fluentUri);
+const fluentCompletionRequest = request('textDocument/completion', {
+	textDocument: { uri: fluentUri },
+	position: positionAt(fluentText, fluentText.length),
+});
+send(fluentCompletionRequest);
+const fluentCompletion = await waitFor((message) => message.id === fluentCompletionRequest.id);
+const fluentLabels = (Array.isArray(fluentCompletion.result) ? fluentCompletion.result : []).map((item) => item.label);
+check(
+	fluentLabels.includes('setSelect') && fluentLabels.includes('where') && fluentLabels.includes('fetchAll'),
+	'PHP: completion в многострочной fluent-цепочке query()->setSelect()->where()->',
 );
 const membersText = '<?php\nnamespace Vendor\\Demo;\nclass HoverMembers\n{\n    private const LIMIT = 10;\n    private ?string $cache;\n}\n';
 const membersUri = pathToFileURL(membersPath).toString();

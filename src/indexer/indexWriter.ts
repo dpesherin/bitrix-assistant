@@ -346,7 +346,9 @@ export class IndexWriter {
 						(name, namespace, fqcn, signature, return_type, params_json, doc, deprecated, file, line)
 					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 					fn.name,
-					parsed.namespace || null,
+					// namespace — по FQCN функции: в мета-файлах ядра namespace-блоков
+					// несколько, и общий `parsed.namespace` для них неверен.
+					fn.fqcn.includes('\\') ? fn.fqcn.slice(0, fn.fqcn.lastIndexOf('\\')) : null,
 					fn.fqcn,
 					fn.signature,
 					fn.returnType ?? null,

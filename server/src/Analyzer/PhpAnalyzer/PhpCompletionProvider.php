@@ -298,6 +298,18 @@ final class PhpCompletionProvider
 				$start = $i;
 				continue;
 			}
+			// Перенос строки внутри fluent-цепочки: `->where(...)` на следующей
+			// строке. Пробел допустим, только если он примыкает к `->`/`::`
+			// (иначе выражение бы «съело» соседние инструкции).
+			if ($char === ' ' || $char === "\t" || $char === "\n" || $char === "\r") {
+				$left = rtrim(substr($text, 0, $i));
+				$right = ltrim(substr($text, $i + 1));
+				if (preg_match('/(?:->|::)$/', $left) === 1 || preg_match('/^(?:->|::)/', $right) === 1) {
+					$start = $i;
+					continue;
+				}
+				break;
+			}
 			if ($isChar($char)) {
 				$start = $i;
 				continue;

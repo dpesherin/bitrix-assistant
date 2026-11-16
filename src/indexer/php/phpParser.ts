@@ -494,11 +494,12 @@ function splitParams(original: string, masked: string, from: number, to: number)
 	return parts;
 }
 
-/** Читает тип из начала строки: `Foo`, `?Foo`, `Foo|Bar`, `Foo | Bar`, `array<Foo>`. */
+/** Читает тип из начала строки: `Foo`, `?Foo`, `Foo|Bar`, `Foo | Bar`, `array<Foo>`, `$this`. */
 function readType(text: string): string | undefined {
 	let out = '';
 	let i = 0;
-	const isTypeChar = (ch: string): boolean => /[A-Za-z0-9_\\?|&<>[\](),.]/.test(ch);
+	// `$` нужен для `@return $this` (fluent-цепочки ORM: `->setSelect()->where()`).
+	const isTypeChar = (ch: string): boolean => /[A-Za-z0-9_\\?|&<>[\](),.$]/.test(ch);
 	while (i < text.length) {
 		const ch = text[i];
 		if (isTypeChar(ch)) {
@@ -541,9 +542,9 @@ function docblockType(doc: string | undefined, tag: 'var' | 'return'): string | 
 	return readType(match[1]);
 }
 
-/** Разбирает строку `@method [static] ReturnType name(params)`. */
+/** Разбирает строку `@method [static] ReturnType name(params)`, включая `@method $this where(...)`. */
 function parseMethodAnnotation(text: string): ParsedMethod | undefined {
-	const match = /^(?:static\s+)?([A-Za-z0-9_\\?|&<>\[\]]+\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)/.exec(text.trim());
+	const match = /^(?:static\s+)?([$A-Za-z0-9_\\?|&<>\[\]]+\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)/.exec(text.trim());
 	if (!match) {
 		return undefined;
 	}
@@ -676,7 +677,7 @@ function parseTopLevelFunctions(
 	masked: string,
 	docblocks: PhpDocBlock[],
 	starts: number[],
-	namespace: string,
+	namespaceAt: (offset: number) => string,
 	classRanges: Array<[number, number]>,
 ): { functions: ParsedFunction[]; ranges: Array<[number, number]> } {
 	const functions: ParsedFunction[] = [];
@@ -709,9 +710,10 @@ function parseTopLevelFunctions(
 		const returnType = returnMatch ? returnMatch[1] : docReturn;
 		const deprecatedLine = doc?.text.split('\n').find((line) => /^@deprecated\b/.test(line));
 		const signatureBody = paramsText.replace(/\s+/g, ' ').trim();
+		const fnNamespace = namespaceAt(m.index);
 		functions.push({
 			name,
-			fqcn: namespace ? `${namespace}\\${name}` : name,
+			fqcn: fnNamespace ? `${fnNamespace}\\${name}` : name,
 			signature: `${name}(${signatureBody})${returnType ? `: ${returnType}` : ''}`,
 			returnType,
 			params,
@@ -778,12 +780,61 @@ function parseGlobalConstants(
 	return constants;
 }
 
+/**
+ * Области действия `namespace` в файле: `namespace X;` действует до следующего
+ * объявления, `namespace X { … }` — внутри своих скобок. Нужны мета-файлы ядра
+ * (`bitrix/modules/crm/meta/orm.php`): там сотни namespace-блоков в одном файле.
+ */
+function findNamespaceScopes(masked: string): Array<{ name: string; start: number; end: number }> {
+	const heads: Array<{ name: string; declEnd: number; braced: boolean }> = [];
+	const re = /\bnamespace\s+([A-Za-z0-9_\\]+)\s*([;{])/g;
+	for (let m = re.exec(masked); m; m = re.exec(masked)) {
+		heads.push({ name: m[1].replace(/^\\/, ''), declEnd: re.lastIndex, braced: m[2] === '{' });
+	}
+	return heads.map((head, index) => {
+		if (!head.braced) {
+			return { name: head.name, start: head.declEnd, end: heads[index + 1]?.declEnd ?? masked.length };
+		}
+		const open = head.declEnd - 1;
+		return { name: head.name, start: open + 1, end: matchingBrace(masked, open) };
+	});
+}
+
 export function parsePhpFile(content: string): ParsedPhpFile {
 	const { masked, docblocks } = maskPhp(content);
 	const starts = lineStartsOf(content);
-	const namespaceMatch = /\bnamespace\s+([A-Za-z0-9_\\]+)\s*[;{]/.exec(masked);
-	const namespace = namespaceMatch ? namespaceMatch[1].replace(/^\\/, '') : '';
+	const scopes = findNamespaceScopes(masked);
+	const namespace = scopes[0]?.name ?? '';
 	const uses = findUseStatements(masked);
+	const scopeUses = new Map<number, Map<string, string>>();
+	// Позиция → namespace/use своей области. В мета-файлах ядра
+	// (`bitrix/modules/crm/meta/orm.php`) сотни `namespace … { }` в одном файле:
+	// без этого все классы получали namespace первого блока и не находились по FQCN.
+	const scopeIndexAt = (offset: number): number => {
+		for (let i = scopes.length - 1; i >= 0; i--) {
+			if (offset >= scopes[i].start && offset <= scopes[i].end) {
+				return i;
+			}
+		}
+		return -1;
+	};
+	const namespaceAt = (offset: number): string => {
+		const index = scopeIndexAt(offset);
+		return index >= 0 ? scopes[index].name : '';
+	};
+	const usesAt = (offset: number): Map<string, string> => {
+		const index = scopeIndexAt(offset);
+		if (index < 0) {
+			return new Map();
+		}
+		const cached = scopeUses.get(index);
+		if (cached !== undefined) {
+			return cached;
+		}
+		const scoped = findUseStatements(masked.slice(scopes[index].start, scopes[index].end));
+		scopeUses.set(index, scoped);
+		return scoped;
+	};
 	const classes: ParsedClass[] = [];
 	const classRanges: Array<[number, number]> = [];
 
@@ -797,15 +848,17 @@ export function parsePhpFile(content: string): ParsedPhpFile {
 		const bodyOpen = m.index + m[0].length - 1;
 		const bodyClose = matchingBrace(masked, bodyOpen);
 		classRanges.push([bodyOpen, bodyClose]);
+		const classNamespace = namespaceAt(m.index);
+		const classUses = usesAt(m.index);
 		const extendsMatch = /\bextends\s+([A-Za-z0-9_\\]+)/.exec(header);
 		const implementsMatch = /\bimplements\s+([A-Za-z0-9_\\,\s]+)/.exec(header);
 		const implementsList = implementsMatch
 			? implementsMatch[1]
 					.split(',')
-					.map((item) => resolveImportedName(item, uses))
+					.map((item) => resolveImportedName(item, classUses))
 					.filter(Boolean)
 			: [];
-		const extendsName = extendsMatch ? resolveImportedName(extendsMatch[1], uses) : undefined;
+		const extendsName = extendsMatch ? resolveImportedName(extendsMatch[1], classUses) : undefined;
 		const doc = findDocblock(docblocks, m.index, masked);
 		const deprecatedLine = doc?.text.split('\n').find((line) => /^@deprecated\b/.test(line));
 		const methods: ParsedMethod[] = [];
@@ -867,9 +920,9 @@ export function parsePhpFile(content: string): ParsedPhpFile {
 		const members = parseClassMembers(content, masked, docblocks, starts, bodyOpen, bodyClose);
 		const extendsShort = extendsName?.split('\\').pop();
 		classes.push({
-			fqcn: namespace ? `${namespace}\\${name}` : name,
+			fqcn: classNamespace ? `${classNamespace}\\${name}` : name,
 			name,
-			namespace,
+			namespace: classNamespace,
 			kind,
 			extends: extendsName,
 			implements: implementsList,
@@ -883,11 +936,11 @@ export function parsePhpFile(content: string): ParsedPhpFile {
 			methods,
 			properties: members.properties,
 			constants: members.constants,
-			traits: members.traits.map((name) => resolveImportedName(name, uses)),
+			traits: members.traits.map((name) => resolveImportedName(name, classUses)),
 		});
 	}
 
-	const parsedFunctions = parseTopLevelFunctions(content, masked, docblocks, starts, namespace, classRanges);
+	const parsedFunctions = parseTopLevelFunctions(content, masked, docblocks, starts, namespaceAt, classRanges);
 	const phpConstants = parseGlobalConstants(
 		content,
 		masked,
