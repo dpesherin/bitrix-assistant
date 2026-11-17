@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { BitrixIndexer, ClassCompletionRow } from '../indexer/indexer';
 import { errorMessage, log } from '../log';
+import { isInsidePhpTag } from './phpContext';
 
 const TOKEN_RE = /([\\A-Za-z0-9_]+)$/;
 
@@ -47,6 +48,11 @@ export class PhpClassCompletionProvider implements vscode.CompletionItemProvider
 		position: vscode.Position,
 	): Promise<vscode.CompletionItem[] | undefined> {
 		if (document.languageId !== 'php') {
+			return undefined;
+		}
+		// В HTML-разметке шаблона классы PHP не предлагаем: на `class="Test"`
+		// иначе всплывали классы Битрикса и вставлялся `use`.
+		if (!isInsidePhpTag(document.getText(), document.offsetAt(position))) {
 			return undefined;
 		}
 		const before = document.lineAt(position).text.slice(0, position.character);

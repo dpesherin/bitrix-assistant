@@ -469,14 +469,17 @@ final class Server
 		$before = substr($document->text, $from, $offset - $from);
 		$items = [];
 		$inPhp = $document->languageId === 'php' && $this->isPhpContext($document->text, $offset);
-		$jsOnly = in_array($document->languageId, self::JS_LANGUAGES, true)
-			|| ($document->languageId === 'php'
-				&& !$this->isPhpContext($document->text, $offset)
-				&& $this->isJsContext($document->text, $offset));
+		$inScript = $document->languageId === 'php' && !$inPhp && $this->isJsContext($document->text, $offset);
+		$jsOnly = in_array($document->languageId, self::JS_LANGUAGES, true) || $inScript;
 		if ($jsOnly) {
 			// Внутри <script> PHP-подсказки не примешиваем: иначе в параметрах
 			// JS-вызова появлялись функции PHP.
 			return $this->jsCompletion->provide($document, $offset);
+		}
+		if ($document->languageId === 'php' && !$inPhp) {
+			// HTML-разметка шаблона: здесь нужны имена атрибутов и текст, а не
+			// функции, константы и конструкции PHP.
+			return [];
 		}
 		return $this->phpCompletion->provide($document, $offset);
 	}

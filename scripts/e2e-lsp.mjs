@@ -1961,6 +1961,26 @@ check(
 	'PHP: foreach подсказывается готовой конструкцией с фигурными скобками',
 );
 
+// В HTML-разметке шаблона PHP-подсказок быть не должно: там атрибуты и текст.
+const markupText = '<?php $x = 1; ?>\n<div class="Te"></div>\n';
+const markupUri = pathToFileURL(path.join(site, 'local/php_interface/markup.php')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: markupUri, languageId: 'php', version: 1, text: markupText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === markupUri);
+const markupRequest = request('textDocument/completion', {
+	textDocument: { uri: markupUri },
+	position: positionAt(markupText, markupText.indexOf('class="Te') + 'class="Te'.length),
+});
+send(markupRequest);
+const markupCompletion = await waitFor((message) => message.id === markupRequest.id);
+check(
+	(Array.isArray(markupCompletion.result) ? markupCompletion.result : []).length === 0,
+	'PHP: в HTML-разметке шаблона нет PHP-подсказок',
+);
+
 // JS: встроенные объекты, их подписи параметров и методы на литералах.
 const nativeText = ['JSON.stringify({ a: 1 });', 'JSON.', "'abc'.replace("].join('\n');
 const nativeUri = pathToFileURL(path.join(site, 'local/js/app/native.js')).toString();

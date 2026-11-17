@@ -4,6 +4,7 @@ import { generateOrmAnnotation, parseOrmFields } from '../src/features/ormAnnota
 import { platformKey, resolveLspLaunch, staticBinaryName } from '../src/lsp/platform';
 import { updateKeybindings } from '../src/features/hotkeysConfig';
 import { parseLintOutput } from '../src/features/phpLint';
+import { isInsidePhpTag } from '../src/features/phpContext';
 import { selectRuntimeAsset } from '../src/php/runtimeAssets';
 import {
 	BUNDLED_PHP_VERSION,
@@ -14,6 +15,18 @@ import {
 	versionMatches,
 } from '../src/php/interpreter';
 import { parse } from 'jsonc-parser';
+
+test('PHP-шаблон: разметка отличается от кода в <?php ?>', () => {
+	const tpl = '<?php $x = 1; ?>\n<div class="Test" id="box"></div>\n<?= $y ?>';
+	// Внутри разметки — не PHP: иначе на `class="Test"` всплывали классы.
+	assert.equal(isInsidePhpTag(tpl, tpl.indexOf('Test')), false);
+	assert.equal(isInsidePhpTag(tpl, tpl.indexOf('$x')), true);
+	assert.equal(isInsidePhpTag(tpl, tpl.lastIndexOf('$y')), true);
+	// После закрывающего тега — снова разметка.
+	assert.equal(isInsidePhpTag(tpl, tpl.length), false);
+	// Файл без разметки целиком в PHP.
+	assert.equal(isInsidePhpTag('<?php echo 1;', 13), true);
+});
 
 test('PHP runtime: выбор prebuilt-сборки под платформу', () => {
 	const names = [
