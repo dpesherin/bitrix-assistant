@@ -82,7 +82,7 @@ export class RemotePreview {
 
 	/** Очищает временные копии просмотра/сравнения. */
 	async clearCache(): Promise<void> {
-		for (const name of ['preview', 'compare']) {
+		for (const name of ['preview', 'compare', 'merge']) {
 			const directory = path.join(this.context.globalStorageUri.fsPath, name);
 			await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => undefined);
 		}

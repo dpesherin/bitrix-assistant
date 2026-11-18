@@ -11,6 +11,8 @@ type SqliteModule = typeof import('node:sqlite');
  */
 export class Database {
 	private readonly statements = new Map<string, StatementSync>();
+	/** Глубина вложенности транзакций: BEGIN/COMMIT делает только внешняя. */
+	private depth = 0;
 
 	private constructor(
 		readonly file: string,
@@ -76,15 +78,30 @@ export class Database {
 		return this.statement(sql).get(...params) as T | undefined;
 	}
 
+	/**
+	 * Транзакция. Вложенный вызов не открывает вторую: BEGIN/COMMIT делает только
+	 * внешняя. Так пачку файлов можно писать одной транзакцией, не переписывая
+	 * методы, которые привыкли оборачивать себя сами.
+	 */
 	transaction<T>(fn: () => T): T {
+		if (this.depth > 0) {
+			return fn();
+		}
+		this.depth = 1;
 		this.exec('BEGIN IMMEDIATE;');
 		try {
 			const result = fn();
 			this.exec('COMMIT;');
 			return result;
 		} catch (err) {
-			this.exec('ROLLBACK;');
+			try {
+				this.exec('ROLLBACK;');
+			} catch {
+				// Транзакции уже нет (например, COMMIT упал сам) — исходная ошибка важнее.
+			}
 			throw err;
+		} finally {
+			this.depth = 0;
 		}
 	}
 

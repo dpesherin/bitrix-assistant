@@ -142,6 +142,11 @@
 				"category": "Bitrix Assistant"
 			},
 			{
+				"command": "bitrix.ssh.merge",
+				"title": "Bitrix Assistant: Слить с сервером",
+				"icon": "$(git-merge)"
+			},
+			{
 				"command": "bitrix.ssh.compareRemote",
 				"title": "Bitrix Assistant: Сравнить с сервером",
 				"icon": "$(diff)"
@@ -230,6 +235,11 @@
 					"default": false,
 					"description": "Скачивать файл при открытии, если на сервере он новее локальной копии."
 				},
+				"bitrix.ssh.mergeEditor": {
+					"type": "boolean",
+					"default": true,
+					"description": "При конфликте версий предлагать слияние во встроенном редакторе слияния VS Code (при выключении остаётся только перезапись)."
+				},
 				"bitrix.ssh.exclude": {
 					"type": "array",
 					"items": {
@@ -257,6 +267,13 @@
 					"type": "string",
 					"default": "bitrix",
 					"description": "Путь к каталогу bitrix относительно корня workspace (абсолютный путь тоже допустим)."
+				},
+				"bitrix.index.threads": {
+					"type": "number",
+					"default": 0,
+					"minimum": 0,
+					"maximum": 4,
+					"description": "Сколько потоков отдавать разбору файлов при индексации. 0 — автоматически (до 4, на один меньше числа ядер), 1 — без потоков, разбор в основном процессе (минимум нагрузки на систему)."
 				},
 				"bitrix.index.exclude": {
 					"type": "array",
@@ -486,6 +503,11 @@
 					"group": "bitrix@1"
 				},
 				{
+					"command": "bitrix.ssh.merge",
+					"when": "resourceScheme == file && bitrix.sshConnected",
+					"group": "bitrix@4"
+				},
+				{
 					"command": "bitrix.ssh.download",
 					"when": "resourceScheme == file && bitrix.sshConnected",
 					"group": "bitrix@2"
@@ -541,9 +563,14 @@
 			],
 			"editor/title/context": [
 				{
-					"command": "bitrix.ssh.compareRemote",
+					"command": "bitrix.ssh.merge",
 					"when": "resourceScheme == file && bitrix.sshConnected",
 					"group": "navigation@1"
+				},
+				{
+					"command": "bitrix.ssh.compareRemote",
+					"when": "resourceScheme == file && bitrix.sshConnected",
+					"group": "navigation@2"
 				}
 			]
 		},
@@ -588,6 +615,7 @@
 		"build:php": "bash scripts/build-php.sh",
 		"package": "bash scripts/package-platforms.sh",
 		"test:e2e": "npm run compile && node scripts/e2e-lsp.mjs",
+		"bench:index": "npm run compile && node scripts/bench-index.mjs",
 		"package:platforms": "bash scripts/package-platforms.sh",
 		"package:universal": "npx @vscode/vsce package",
 		"test:host": "npm run compile && node out/test/integration/runTest.js"

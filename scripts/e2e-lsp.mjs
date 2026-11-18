@@ -976,6 +976,97 @@ for (const indexed of [methodFilePath, referenceUsagePath]) {
 	);
 }
 
+
+// --- Иерархия для проверки наследования, интерфейсов, трейтов и self/static/parent ---
+const hierarchyDir = path.join(site, 'local/php_interface/hier');
+mkdirSync(hierarchyDir, { recursive: true });
+const hierarchyFile = (name) => path.join(hierarchyDir, `${name}.php`);
+const addClass = (fqcn, name, kind, file, line, extra = {}) => {
+	db.run(
+		'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line, extends, implements, traits_json) VALUES (?,?,?,?,?,?,?,?,?,?)',
+		fqcn,
+		name,
+		'Demo',
+		kind,
+		'demo',
+		file,
+		line,
+		extra.extends ?? null,
+		JSON.stringify(extra.implements ?? []),
+		JSON.stringify(extra.traits ?? []),
+	);
+};
+const addMethod = (fqcn, name, signature, returnType, params, file, line, doc, isStatic = 0) => {
+	db.run(
+		'INSERT INTO methods (class_fqcn, name, signature, return_type, params_json, is_static, visibility, is_abstract, deprecated, doc, file, line) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+		fqcn,
+		name,
+		signature,
+		returnType,
+		JSON.stringify(params),
+		isStatic,
+		'public',
+		0,
+		0,
+		doc,
+		file,
+		line,
+	);
+};
+const chainFiles = {};
+let chainParent = null;
+for (const [index, className] of ['Base0', 'Base1', 'Base2', 'Base3', 'Base4'].entries()) {
+	const file = hierarchyFile(className);
+	writeFileSync(
+		file,
+		`<?php\nnamespace Demo;\n\nclass ${className}${chainParent === null ? '' : ' extends ' + chainParent}\n{\n}\n`,
+	);
+	chainFiles[className] = file;
+	addClass(`Demo\\${className}`, className, 'class', file, 1, { extends: chainParent });
+	addMethod(`Demo\\${className}`, `method${index}`, `method${index}(string $arg${index}): string`, 'string', [
+		{ name: `arg${index}`, type: 'string' },
+	], file, 5, `Метод ${className}.`);
+	chainParent = `Demo\\${className}`;
+}
+// Переопределение в Base3: подсказка и hover должны брать именно его.
+db.run('DELETE FROM methods WHERE class_fqcn = ? AND name = ?', 'Demo\\Base3', 'method0');
+addMethod(
+	'Demo\\Base3',
+	'method0',
+	'method0(string $arg0, int $extra = 0): string',
+	'string',
+	[{ name: 'arg0', type: 'string' }, { name: 'extra', type: 'int', default: '0' }],
+	chainFiles.Base3,
+	7,
+	'Переопределено в Base3.',
+);
+addMethod('Demo\\Base0', 'create', 'create(): static', 'static', [], chainFiles.Base0, 9, 'Создаёт экземпляр.', 1);
+writeFileSync(
+	hierarchyFile('Leaf'),
+	'<?php\nnamespace Demo;\n\nclass Leaf extends Base4\n{\n}\n',
+);
+addClass('Demo\\Leaf', 'Leaf', 'class', hierarchyFile('Leaf'), 1, { extends: 'Demo\\Base4' });
+
+for (const [index, name] of ['I1', 'I2', 'I3'].entries()) {
+	const file = hierarchyFile(name);
+	writeFileSync(file, `<?php\nnamespace Demo;\n\ninterface ${name}\n{\n}\n`);
+	addClass(`Demo\\${name}`, name, 'interface', file, 1);
+	addMethod(`Demo\\${name}`, `iface${index + 1}`, `iface${index + 1}(int $a): void`, 'void', [{ name: 'a', type: 'int' }], file, 3, `Метод интерфейса ${name}.`);
+}
+writeFileSync(hierarchyFile('Multi'), '<?php\nnamespace Demo;\n\nclass Multi extends Base4 implements I1, I2, I3\n{\n}\n');
+addClass('Demo\\Multi', 'Multi', 'class', hierarchyFile('Multi'), 1, {
+	extends: 'Demo\\Base4',
+	implements: ['Demo\\I1', 'Demo\\I2', 'Demo\\I3'],
+});
+writeFileSync(hierarchyFile('T'), '<?php\nnamespace Demo;\n\ntrait T\n{\n}\n');
+addClass('Demo\\T', 'T', 'trait', hierarchyFile('T'), 1);
+addMethod('Demo\\T', 'traitMethod', 'traitMethod(): bool', 'bool', [], hierarchyFile('T'), 3, 'Метод трейта.');
+writeFileSync(hierarchyFile('WithTrait'), '<?php\nnamespace Demo;\n\nclass WithTrait extends Base4\n{\n    use T;\n}\n');
+addClass('Demo\\WithTrait', 'WithTrait', 'class', hierarchyFile('WithTrait'), 1, {
+	extends: 'Demo\\Base4',
+	traits: ['Demo\\T'],
+});
+
 db.exec('COMMIT;');
 
 
@@ -3127,6 +3218,137 @@ const legacyCodes = (legacyDiagnostics?.params?.diagnostics ?? [])
 check(
 	legacyCodes.length === 0,
 	`PHP: регистр метода и union-тип возврата не дают ложных предупреждений (${legacyCodes.join('; ')})`,
+);
+
+// --- Типы, чейнинг с переносами, иерархия, объявления ---
+const askLsp = async (method, params) => {
+	const id = nextId;
+	send(request(method, params));
+	return (await waitFor((message) => message.id === id)).result;
+};
+const openPhp = async (name, source) => {
+	const file = path.join(hierarchyDir, `${name}.php`);
+	writeFileSync(file, source);
+	const uri = pathToFileURL(file).toString();
+	send({
+		jsonrpc: '2.0',
+		method: 'textDocument/didOpen',
+		params: { textDocument: { uri, languageId: 'php', version: 1, text: source } },
+	});
+	return uri;
+};
+const completionAt = async (uri, line, character) =>
+	(await askLsp('textDocument/completion', { textDocument: { uri }, position: { line, character } })) ?? [];
+const labels = (items) => items.map((item) => String(item.label));
+
+const typeCases = [
+	['тип возврата', '<?php\nclass A {\n    public function test(): str', 2, 29, 'string'],
+	['тип возврата с переносом', '<?php\nclass A {\n    public function test():\n        int', 3, 11, 'int'],
+	['тип параметра', '<?php\nfunction run(str', 1, 16, 'string'],
+	['тип параметра в несколько строк', '<?php\nclass A {\n    public function test(\n        string $a,\n        arr', 4, 11, 'array'],
+	['тип свойства nullable', '<?php\nclass A {\n    private ?flo', 2, 16, 'float'],
+	['union-тип', '<?php\nclass A {\n    public function test(): string|arr', 2, 37, 'array'],
+	['intersection-тип', '<?php\nclass A {\n    public function test(): Countable&arr', 2, 41, 'array'],
+];
+for (const [index, [label, source, line, character, expected]] of typeCases.entries()) {
+	const uri = await openPhp(`types${index}`, source);
+	const items = await completionAt(uri, line, character);
+	check(labels(items).includes(expected), `PHP: ${label} → ${expected} (${labels(items).join(', ')})`);
+}
+
+const leafUri = await openPhp('chain-leaf', '<?php\n$leaf = new \\Demo\\Leaf();\n$leaf\n    ->');
+check(
+	labels(await completionAt(leafUri, 3, 6)).includes('method4'),
+	'PHP: чейнинг `$var` с переносом строки',
+);
+const thisUri = await openPhp(
+	'chain-this',
+	'<?php\nnamespace Demo;\nclass Leaf extends Base4\n{\n    public function run(): void\n    {\n        $this\n            ->\n    }\n}\n',
+);
+check(
+	labels(await completionAt(thisUri, 7, 14)).includes('method4'),
+	'PHP: `$this->` с переносом строки',
+);
+const staticUri = await openPhp('chain-static', '<?php\n\\Demo\\Leaf\n    ::');
+check(
+	labels(await completionAt(staticUri, 2, 6)).includes('create'),
+	'PHP: статический вызов `::` с переносом строки',
+);
+
+const leafItems = await completionAt(leafUri, 3, 6);
+const leafLabels = labels(leafItems);
+check(
+	['method4', 'method3', 'method2', 'method1', 'method0'].every((name) => leafLabels.includes(name)),
+	`PHP: методы со всех 5 уровней наследования (${leafLabels.join(', ')})`,
+);
+const multiUri = await openPhp('chain-multi', '<?php\n$multi = new \\Demo\\Multi();\n$multi->');
+const multiLabels = labels(await completionAt(multiUri, 2, 8));
+check(
+	['iface1', 'iface2', 'iface3'].every((name) => multiLabels.includes(name)),
+	`PHP: методы трёх интерфейсов (${multiLabels.join(', ')})`,
+);
+const traitUri = await openPhp('chain-trait', '<?php\n$w = new \\Demo\\WithTrait();\n$w->');
+check(labels(await completionAt(traitUri, 2, 4)).includes('traitMethod'), 'PHP: метод трейта в подсказках');
+
+const indexedLeaf = '<?php\nnamespace Demo;\nclass Leaf extends Base4\n{\n    public function run(): void\n    {\n        KEYWORD::\n    }\n}\n';
+for (const keyword of ['self', 'static', 'parent']) {
+	const uri = await openPhp(`kw-${keyword}`, indexedLeaf.replace('KEYWORD', keyword));
+	const line = 6;
+	const items = await completionAt(uri, line, 8 + keyword.length + 2);
+	check(labels(items).includes('method4'), `PHP: ${keyword}:: для класса из индекса`);
+}
+const unsavedUri = await openPhp(
+	'kw-self-unsaved',
+	'<?php\nnamespace Demo;\nclass BrandNew extends Base4\n{\n    public function ownMethod(int $a): void {}\n    public function run(): void\n    {\n        self::\n    }\n}\n',
+);
+const unsavedLabels = labels(await completionAt(unsavedUri, 7, 14));
+check(
+	unsavedLabels.includes('ownMethod') && unsavedLabels.includes('method4'),
+	`PHP: self:: у ещё не проиндексированного класса (${unsavedLabels.join(', ')})`,
+);
+
+const hierarchyDoc = '<?php\n$leaf = new \\Demo\\Leaf();\n$leaf->method0("x");\n';
+const hierarchyUri = await openPhp('hierarchy-call', hierarchyDoc);
+const hoverResult = await askLsp('textDocument/hover', {
+	textDocument: { uri: hierarchyUri },
+	position: { line: 2, character: 9 },
+});
+check(String(hoverResult?.contents?.value ?? '').includes('Переопределено в Base3'), 'PHP: hover берёт doc переопределённого метода');
+const definitionResult = await askLsp('textDocument/definition', {
+	textDocument: { uri: hierarchyUri },
+	position: { line: 2, character: 9 },
+});
+check(
+	String(definitionResult?.[0]?.uri ?? '').endsWith('Base3.php'),
+	'PHP: definition унаследованного метода ведёт в объявление',
+);
+const signatureDoc = '<?php\n$leaf = new \\Demo\\Leaf();\n$leaf->method0();\n';
+const signatureUri = await openPhp('signature-call', signatureDoc);
+const signatureResult = await askLsp('textDocument/signatureHelp', {
+	textDocument: { uri: signatureUri },
+	position: { line: 2, character: 15 },
+});
+const signatureLabel = String(signatureResult?.signatures?.[0]?.label ?? '');
+check(signatureLabel.includes('int $extra'), `PHP: параметры унаследованного метода (${signatureLabel})`);
+
+const declarationUri = await openPhp('declaration', '<?php\nclass A {\n    public func');
+check(labels(await completionAt(declarationUri, 2, 15)).includes('function'), 'PHP: объявление после модификатора `public func`');
+
+const jsChainUri = pathToFileURL(path.join(site, 'local/js/app/chain.js')).toString();
+const jsChainText = 'BX.Main\n    .\n';
+writeFileSync(path.join(site, 'local/js/app/chain.js'), jsChainText);
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: jsChainUri, languageId: 'javascript', version: 1, text: jsChainText } },
+});
+check(
+	labels(await completionAt(jsChainUri, 1, 5)).includes('Popup'),
+	'JS: чейнинг с переносом строки перед точкой',
+);
+check(
+	labels(await completionAt(jsChainUri, 1, 5)).includes('Popup'),
+	'JS: члены после точки с переносом строки',
 );
 
 send(request('shutdown', {}));

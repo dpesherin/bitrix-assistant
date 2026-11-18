@@ -5,9 +5,23 @@ import * as vscode from 'vscode';
 import { log, errorMessage } from '../log';
 import { readSettings } from '../settings';
 import { isExcluded, toPosix } from '../util/glob';
+import { mapPool } from '../util/pool';
 import { Database } from './db';
 import { PARSER_VERSION } from './schema';
 import { IndexWriter } from './indexWriter';
+import { ParsePool, WORKER_MIN_FILES, resolveThreads, settlePool } from './parsePool';
+import type { JsParseResult, ParseResult, ParsedFile, PhpParseResult } from './parseWorker';
+
+/**
+ * Сколько каталогов читать одновременно при обходе. Больше — быстрее на больших
+ * проектах, но и больше параллельных запросов к диску; 8 — компромисс.
+ */
+const WALK_CONCURRENCY = 8;
+
+/** Отдать управление event loop: длинная синхронная работа не должна морозить интерфейс. */
+function yieldToLoop(): Promise<void> {
+	return new Promise<void>((resolve) => setImmediate(resolve));
+}
 
 export interface ClassCompletionRow {
 	fqcn: string;
@@ -518,30 +532,71 @@ export class BitrixIndexer implements vscode.Disposable {
 		writer.indexModules(layout.bitrixDir, layout.localDir);
 		if (settings.indexPhpStubs) {
 			const stubsFile = path.join(this.context.extensionPath, 'server', 'data', 'php-stubs.json');
-			if (fs.existsSync(stubsFile)) {
+			// Стабы — это ~1,6 МБ JSON и тысяча INSERT-ов на каждый sync. Перебирать
+			// их заново нужно только когда файл (или версия разбора) изменился.
+			const signature = this.stubsSignature(stubsFile);
+			const storedSignature = db.all<{ value: string }>(
+				"SELECT value FROM meta WHERE key = 'php_stubs_signature' LIMIT 1",
+			)[0]?.value;
+			if (signature && (force || signature !== storedSignature)) {
 				const count = writer.writePhpStubs(stubsFile);
+				db.run(
+					'INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)',
+					'php_stubs_signature',
+					signature,
+				);
 				log().debug(`php-stubs: импортировано ${count} встроенных функций PHP`);
 			}
 		}
 
+		// Корни обхода накладываются друг на друга (local/components ⊂ local и т.п.),
+		// поэтому каждый каталог читаем ровно один раз — отдельно для PHP и JS.
+		const phpVisited = new Set<string>();
 		const phpFiles: string[] = [];
-		await this.collectPhpFiles(layout, excludes, token, phpFiles, settings.indexVendor);
+		await this.collectPhpFiles(layout, excludes, token, phpFiles, settings.indexVendor, phpVisited);
 		const jsFiles: string[] = [];
 		const configFiles: string[] = [];
-		await this.collectJsFiles(layout, excludes, settings.jsMaxFileSizeKb, token, jsFiles, configFiles);
+		const jsVisited = new Set<string>();
+		await this.collectJsFiles(layout, excludes, settings.jsMaxFileSizeKb, token, jsFiles, configFiles, jsVisited);
 
 		report(`PHP: ${phpFiles.length}, JS: ${jsFiles.length}, config.php: ${configFiles.length}`);
 
+		// Проверка «файл не менялся» — это stat на файл. Последовательно она стоила
+		// больше, чем сам разбор (на больших каталогах — сотни миллисекунд), поэтому
+		// проверяем пулом и дальше идём только по изменившимся.
+		const changed = await this.changedFiles(hashRows, [...configFiles, ...jsFiles, ...phpFiles], force, token);
+
 		// 1. Конфиги расширений (нужны раньше JS-файлов — для привязки глобалов).
+		// Пишем пачками: на проекте это сотни файлов, и транзакция на каждый — дорого.
+		let configBatch: string[] = [];
+		const flushConfigs = (): void => {
+			if (configBatch.length === 0) {
+				return;
+			}
+			const batch = configBatch;
+			configBatch = [];
+			db.transaction(() => {
+				for (const file of batch) {
+					writer.writeConfigFile(file);
+					this.touchHash(db, file);
+				}
+			});
+		};
+		let configsInBatch = 0;
 		for (const file of configFiles) {
 			this.throwIfCancelled(token);
 			seen.add(file);
-			if (!force && (await this.isUnchanged(hashRows, file))) {
+			if (!changed.has(file)) {
 				continue;
 			}
-			writer.writeConfigFile(file);
-			this.touchHash(db, file);
+			configBatch.push(file);
+			configsInBatch++;
+			if (configsInBatch % 256 === 0) {
+				flushConfigs();
+				await yieldToLoop();
+			}
 		}
+		flushConfigs();
 		const jscore = path.join(layout.bitrixDir, 'modules', 'main', 'jscore.php');
 		if (fs.existsSync(jscore)) {
 			writer.writeJscore(jscore);
@@ -550,37 +605,80 @@ export class BitrixIndexer implements vscode.Disposable {
 		const extensionByFile = writer.loadExtensionFileMap();
 		report(`Конфиги: ${configFiles.length}, расширений: ${extensionByFile.size ? new Set(extensionByFile.values()).size : 0}`);
 
-		// 2. JS-файлы.
-		let processed = 0;
+		// 2. JS-файлы (глобалы, расширения, типы).
+		const changedJs: string[] = [];
 		for (const file of jsFiles) {
 			this.throwIfCancelled(token);
 			seen.add(file);
-			processed++;
-			if (processed % 500 === 0) {
-				report(`JS: ${processed}/${jsFiles.length}`);
+			if (changed.has(file)) {
+				changedJs.push(file);
 			}
-			if (!force && (await this.isUnchanged(hashRows, file))) {
-				continue;
-			}
-			writer.writeJsFile(file, extensionByFile.get(IndexWriter.jsFileKey(file)));
-			this.touchHash(db, file);
 		}
+		await this.indexParsedFiles(
+			'js',
+			db,
+			changedJs,
+			report,
+			'JS',
+			(batch) => {
+				for (const entry of batch) {
+					const result = entry as JsParseResult;
+					if (!result.globals || !result.shapes) {
+						log().debug(`js ${result.file}: ${result.error ?? 'пустое сканирование'}`);
+						continue;
+					}
+					writer.writeScannedJs({
+						file: result.file,
+						globals: result.globals,
+						shapes: result.shapes,
+						extensionName: extensionByFile.get(IndexWriter.jsFileKey(result.file)),
+					});
+					this.recordResultHash(db, result);
+				}
+			},
+			(file) => {
+				writer.writeJsFile(file, extensionByFile.get(IndexWriter.jsFileKey(file)));
+				this.touchHash(db, file);
+			},
+			token,
+		);
 
 		// 3. PHP-файлы (классы, методы, компоненты).
-		processed = 0;
+		const changedPhp: string[] = [];
 		for (const file of phpFiles) {
 			this.throwIfCancelled(token);
 			seen.add(file);
-			processed++;
-			if (processed % 500 === 0) {
-				report(`PHP: ${processed}/${phpFiles.length}`);
+			if (changed.has(file)) {
+				changedPhp.push(file);
 			}
-			if (!force && (await this.isUnchanged(hashRows, file))) {
-				continue;
-			}
-			writer.writePhpFile(file);
-			this.touchHash(db, file);
 		}
+		await this.indexParsedFiles(
+			'php',
+			db,
+			changedPhp,
+			report,
+			'PHP',
+			(batch) => {
+				for (const entry of batch) {
+					const result = entry as PhpParseResult;
+					if (!result.content || !result.parsed) {
+						log().debug(`php ${result.file}: ${result.error ?? 'пустой разбор'}`);
+						continue;
+					}
+					writer.writeParsedPhpFile({
+						file: result.file,
+						content: result.content,
+						parsed: result.parsed,
+					});
+					this.recordResultHash(db, result);
+				}
+			},
+			(file) => {
+				writer.writePhpFile(file);
+				this.touchHash(db, file);
+			},
+			token,
+		);
 
 		// 4. Удалённые файлы.
 		if (!token?.isCancellationRequested) {
@@ -596,9 +694,139 @@ export class BitrixIndexer implements vscode.Disposable {
 		report('Индекс готов.');
 	}
 
+	/**
+	 * Разбор и запись файлов индекса. На большом проекте разбор уходит в пул
+	 * воркеров (самая дорогая часть), запись в SQLite остаётся здесь — база нужна
+	 * LSP-процессу и открытым запросам, второй писатель ей не нужен. Если воркеры
+	 * недоступны или отключены настройкой, те же файлы доделываются в основном
+	 * потоке: результат одинаковый.
+	 */
+	private async indexParsedFiles(
+		kind: 'php' | 'js',
+		db: Database,
+		files: readonly string[],
+		report: Report,
+		label: string,
+		writeBatch: (results: ParseResult[]) => void,
+		writeSingle: (file: string) => void,
+		token?: vscode.CancellationToken,
+	): Promise<void> {
+		const total = files.length;
+		const threads = resolveThreads(readSettings().indexThreads);
+		let processed = 0;
+		const note = (): void => {
+			processed++;
+			if (processed % 500 === 0) {
+				report(`${label}: ${processed}/${total}`);
+			}
+		};
+		if (threads <= 1 || total < WORKER_MIN_FILES) {
+			for (const file of files) {
+				this.throwIfCancelled(token);
+				writeSingle(file);
+				note();
+				if (processed % 100 === 0) {
+					await yieldToLoop();
+				}
+			}
+			return;
+		}
+		const pool = new ParsePool(threads);
+		const written = new Set<string>();
+		// Пачка файлов пишется одной транзакцией: транзакция на файл — это лишние
+		// BEGIN/COMMIT и блокировка, на тысячах файлов такая мелочь стоит секунды.
+		const pending: ParseResult[] = [];
+		const flush = (): void => {
+			if (pending.length === 0) {
+				return;
+			}
+			const batch = pending.splice(0);
+			db.transaction(() => writeBatch(batch));
+		};
+		try {
+			const onBatch = (batch: ParseResult[]): void => {
+				if (token?.isCancellationRequested) {
+					return;
+				}
+				for (const result of batch) {
+					written.add(result.file);
+					pending.push(result);
+					note();
+				}
+				flush();
+			};
+			if (kind === 'php') {
+				await pool.parsePhpStream(files, onBatch, token);
+			} else {
+				await pool.parseJsStream(files, onBatch, token);
+			}
+			flush();
+			return;
+		} catch (err) {
+			if (token?.isCancellationRequested) {
+				throw new vscode.CancellationError();
+			}
+			log().warn(`${label}: разбор в воркерах не удался, доделываю в основном потоке: ${errorMessage(err)}`);
+		} finally {
+			await settlePool(pool);
+		}
+		for (const file of files) {
+			if (written.has(file)) {
+				continue;
+			}
+			this.throwIfCancelled(token);
+			writeSingle(file);
+			note();
+			if (processed % 100 === 0) {
+				await yieldToLoop();
+			}
+		}
+	}
+
+	/** Пишет хэш разобранного файла: посчитанный в воркере или заново здесь. */
+	private recordResultHash(db: Database, parsed: ParsedFile): void {
+		if (parsed.hash !== undefined && parsed.size !== undefined && parsed.mtime !== undefined) {
+			this.recordHash(db, parsed.file, parsed.hash, parsed.size, parsed.mtime);
+			return;
+		}
+		this.touchHash(db, parsed.file);
+	}
+
 	private throwIfCancelled(token?: vscode.CancellationToken): void {
 		if (token?.isCancellationRequested) {
 			throw new vscode.CancellationError();
+		}
+	}
+
+	/** Изменившиеся файлы из списка: stat-проверка пулом, без блокировки event loop. */
+	private async changedFiles(
+		rows: Map<string, { size: number; mtime: number }>,
+		files: readonly string[],
+		force: boolean,
+		token?: vscode.CancellationToken,
+	): Promise<Set<string>> {
+		if (force) {
+			return new Set(files);
+		}
+		const changed = new Set<string>();
+		await mapPool(files, 16, async (file) => {
+			if (token?.isCancellationRequested) {
+				return;
+			}
+			if (!(await this.isUnchanged(rows, file))) {
+				changed.add(file);
+			}
+		});
+		return changed;
+	}
+
+	/** Подпись файла стабов: меняешь стабы или разбор — меняется подпись. */
+	private stubsSignature(stubsFile: string): string | undefined {
+		try {
+			const stat = fs.statSync(stubsFile);
+			return `${PARSER_VERSION}:${stat.size}:${Math.round(stat.mtimeMs)}`;
+		} catch {
+			return undefined;
 		}
 	}
 
@@ -615,6 +843,20 @@ export class BitrixIndexer implements vscode.Disposable {
 			return known.size === stat.size && known.mtime === Math.round(stat.mtimeMs);
 		} catch {
 			return false;
+		}
+	}
+
+	private recordHash(db: Database, file: string, hash: string, size: number, mtime: number): void {
+		try {
+			db.run(
+				'INSERT OR REPLACE INTO file_hashes (path, hash, size, mtime) VALUES (?, ?, ?, ?)',
+				file,
+				hash,
+				size,
+				mtime,
+			);
+		} catch (err) {
+			log().debug(`hash ${file}: ${errorMessage(err)}`);
 		}
 	}
 
@@ -641,6 +883,7 @@ export class BitrixIndexer implements vscode.Disposable {
 		token: vscode.CancellationToken | undefined,
 		out: string[],
 		includeVendor = false,
+		visited?: Set<string>,
 	): Promise<void> {
 		const roots: string[] = [];
 		for (const dir of listDirectories(path.join(layout.bitrixDir, 'modules'))) {
@@ -707,22 +950,17 @@ export class BitrixIndexer implements vscode.Disposable {
 			// local/lib, local/api и т.п.) — их классы тоже должны попадать в индекс.
 			layout.localDir,
 		);
-		for (const root of roots) {
-			if (isDirectory(root)) {
-				await this.walk(
-					root,
-					layout,
-					excludes,
-					token,
-					out,
-					(file) => file.endsWith('.php'),
-					undefined,
-					includeVendor,
-				);
-			} else if (root.endsWith('.php') && isFile(root)) {
-				out.push(root);
-			}
-		}
+		await this.walkRoots(
+			roots,
+			layout,
+			excludes,
+			token,
+			out,
+			(file) => file.endsWith('.php'),
+			undefined,
+			includeVendor,
+			visited,
+		);
 		out.sort();
 		// Дедупликация: layout.localDir пересекается с уже добавленными каталогами.
 		const unique: string[] = [];
@@ -742,26 +980,24 @@ export class BitrixIndexer implements vscode.Disposable {
 		token: vscode.CancellationToken | undefined,
 		jsOut: string[],
 		configOut: string[],
+		visited?: Set<string>,
 	): Promise<void> {
 		const roots: string[] = [path.join(layout.bitrixDir, 'js'), path.join(layout.localDir, 'js')];
 		for (const dir of listDirectories(path.join(layout.bitrixDir, 'modules'))) {
 			roots.push(path.join(dir, 'install', 'js'));
 		}
 		const maxBytes = Math.max(1, maxSizeKb) * 1024;
-		for (const root of roots) {
-			if (!isDirectory(root)) {
-				continue;
-			}
-			await this.walk(
-				root,
-				layout,
-				excludes,
-				token,
-				jsOut,
-				(file) => (file.endsWith('.js') || file.endsWith('.d.ts')) && !file.endsWith('.min.js') && this.sizeOf(file) <= maxBytes,
-				configOut,
-			);
-		}
+		await this.walkRoots(
+			roots,
+			layout,
+			excludes,
+			token,
+			jsOut,
+			(file) => (file.endsWith('.js') || file.endsWith('.d.ts')) && !file.endsWith('.min.js') && this.sizeOf(file) <= maxBytes,
+			configOut,
+			false,
+			visited,
+		);
 		jsOut.sort();
 		configOut.sort();
 	}
@@ -774,8 +1010,14 @@ export class BitrixIndexer implements vscode.Disposable {
 		}
 	}
 
-	private async walk(
-		root: string,
+	/**
+	 * Обход дерева в ширину: каталоги одного уровня читаются параллельно
+	 * (WALK_CONCURRENCY). Последовательный `await readdir` на каждый каталог
+	 * упирался в round-trip к пулу потоков — на 3 800 каталогах это ~100 мс
+	 * простоя главного потока при каждом старте.
+	 */
+	private async walkRoots(
+		roots: readonly string[],
 		layout: BitrixLayout,
 		excludes: string[],
 		token: vscode.CancellationToken | undefined,
@@ -783,37 +1025,67 @@ export class BitrixIndexer implements vscode.Disposable {
 		accept: (file: string) => boolean,
 		configOut?: string[],
 		allowVendor = false,
+		visited?: Set<string>,
 	): Promise<void> {
-		let entries: fs.Dirent[];
-		try {
-			entries = await fs.promises.readdir(root, { withFileTypes: true });
-		} catch {
-			return;
-		}
-		for (const entry of entries) {
-			this.throwIfCancelled(token);
-			const full = path.join(root, entry.name);
-			const rel = toPosix(path.relative(layout.siteRoot, full));
-			if (isExcluded(rel, excludes)) {
-				continue;
-			}
-			if (entry.isDirectory()) {
-				if (SKIP_DIRS.has(entry.name) && !(allowVendor && entry.name === 'vendor')) {
-					continue;
+		let level: string[] = [];
+		for (const root of roots) {
+			if (isDirectory(root)) {
+				if (visited) {
+					if (visited.has(root)) {
+						continue;
+					}
+					visited.add(root);
 				}
-				await this.walk(full, layout, excludes, token, out, accept, configOut);
+				level.push(root);
 				continue;
 			}
-			if (!entry.isFile()) {
-				continue;
+			// Корень может быть отдельным файлом (tools.php, include.php модуля).
+			if (isFile(root) && accept(root)) {
+				out.push(root);
 			}
-			if (configOut && entry.name === 'config.php') {
-				configOut.push(full);
-				continue;
-			}
-			if (accept(full)) {
-				out.push(full);
-			}
+		}
+		while (level.length > 0) {
+			const nextLevel: string[] = [];
+			await mapPool(level, WALK_CONCURRENCY, async (dir) => {
+				let entries: fs.Dirent[];
+				try {
+					entries = await fs.promises.readdir(dir, { withFileTypes: true });
+				} catch {
+					return;
+				}
+				for (const entry of entries) {
+					this.throwIfCancelled(token);
+					const full = path.join(dir, entry.name);
+					const rel = toPosix(path.relative(layout.siteRoot, full));
+					if (isExcluded(rel, excludes)) {
+						continue;
+					}
+					if (entry.isDirectory()) {
+						if (SKIP_DIRS.has(entry.name) && !(allowVendor && entry.name === 'vendor')) {
+							continue;
+						}
+						if (visited) {
+							if (visited.has(full)) {
+								continue;
+							}
+							visited.add(full);
+						}
+						nextLevel.push(full);
+						continue;
+					}
+					if (!entry.isFile()) {
+						continue;
+					}
+					if (configOut && entry.name === 'config.php') {
+						configOut.push(full);
+						continue;
+					}
+					if (accept(full)) {
+						out.push(full);
+					}
+				}
+			});
+			level = nextLevel;
 		}
 	}
 

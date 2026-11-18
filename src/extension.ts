@@ -13,7 +13,9 @@ import { BitrixIndexer, isIndexableSource, resolveLayout } from './indexer/index
 import { errorMessage, initLog, log, showLog } from './log';
 import { BitrixLanguageClient } from './lsp/lspClient';
 import { readSettings } from './settings';
+import { BaseSnapshots } from './ssh/baseSnapshot';
 import { ByteProgress, SshConnectionManager } from './ssh/connection';
+import { MergeService } from './ssh/merge';
 import { RemotePreview } from './ssh/preview';
 import { ProfileStore } from './ssh/profiles';
 import { SshTerminal } from './ssh/terminal';
@@ -29,6 +31,9 @@ import { PhpVersionStatusBar } from './views/phpVersionStatus';
 /** Недавно сохранённые файлы, чтобы watcher не индексировал их повторно. */
 const recentIndexed = new Map<string, number>();
 
+/** Файлы, для которых открыт редактор слияния: после «Complete Merge» предложим загрузку. */
+const pendingMerges = new Set<string>();
+
 interface ActiveExtension {
 	store: ProfileStore;
 	connections: SshConnectionManager;
@@ -38,6 +43,7 @@ interface ActiveExtension {
 	tree: RemoteTreeProvider;
 	indexView: IndexViewProvider;
 	preview: RemotePreview;
+	merge: MergeService;
 	statusBar: BitrixStatusBar;
 	phpSyntax: PhpSyntaxChecker;
 	phpProjects: ProjectPhpStore;
@@ -53,13 +59,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<Active
 
 	const store = new ProfileStore(context);
 	const connections = new SshConnectionManager(store);
-	const sync = new SyncService(connections);
+	const bases = new BaseSnapshots(path.join(context.globalStorageUri.fsPath, 'base'));
+	const sync = new SyncService(connections, bases);
 	const indexer = new BitrixIndexer(context);
 	const phpProjects = new ProjectPhpStore(context);
 	const lsp = new BitrixLanguageClient(context, indexer, phpProjects);
 	const tree = new RemoteTreeProvider(connections);
 	const indexView = new IndexViewProvider(indexer);
 	const preview = new RemotePreview(context, connections);
+	const merge = new MergeService(context, connections, bases);
 	const statusBar = new BitrixStatusBar(connections);
 	const phpSyntax = new PhpSyntaxChecker(context, phpProjects);
 	const phpStatus = new PhpVersionStatusBar(phpSyntax, phpProjects);
@@ -80,6 +88,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Active
 		tree,
 		indexView,
 		preview,
+		merge,
 		statusBar,
 		phpSyntax,
 		phpProjects,
@@ -152,6 +161,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Active
 		vscode.commands.registerCommand('bitrix.ssh.copyRemotePath', (arg?: RemoteNode | string) =>
 			copyRemotePath(ext, arg),
 		),
+		vscode.commands.registerCommand('bitrix.ssh.merge', (arg?: vscode.Uri) => mergeFile(ext, arg)),
 		vscode.commands.registerCommand('bitrix.ssh.compareRemote', (arg?: RemoteNode | string) =>
 			compareRemote(ext, arg),
 		),
@@ -211,6 +221,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<Active
 	registerWatchers(context, ext);
 	setupIndexWatchers(context, ext);
 	void preview.clearCache();
+	// Уборка старых снимков для слияния — в фоне, не чаще раза в сутки.
+	void bases.pruneIfDue();
 
 	const settings = readSettings();
 	if (settings.indexEnabled) {
@@ -289,6 +301,21 @@ function registerWatchers(context: vscode.ExtensionContext, ext: ActiveExtension
 					log().debug(`Индексация ${file}: ${errorMessage(err)}`),
 				);
 			}
+			// Результат слияния сохранён («Complete Merge»): если автозагрузки нет,
+			// предлагаем отправить файл на сервер — иначе слияние останется локальным.
+			const wasMerged = pendingMerges.delete(path.normalize(document.uri.fsPath));
+			if (wasMerged && !settings.uploadOnSave) {
+				void vscode.window
+					.showInformationMessage(
+						`Bitrix Assistant: слияние сохранено — ${path.basename(document.uri.fsPath)}`,
+						'Загрузить на сервер',
+					)
+					.then((choice) => {
+						if (choice === 'Загрузить на сервер') {
+							void vscode.commands.executeCommand('bitrix.ssh.upload', document.uri);
+						}
+					});
+			}
 			if (!settings.uploadOnSave || !ext.connections.isConnected) {
 				return;
 			}
@@ -309,6 +336,9 @@ function registerWatchers(context: vscode.ExtensionContext, ext: ActiveExtension
 				} else if (outcome === 'identical') {
 					log().debug(`Без изменений (содержимое совпадает): ${document.uri.fsPath}`);
 					flashIdentical(name);
+				} else if (outcome === 'merge') {
+					log().info(`Конфликт версий, открываю слияние: ${document.uri.fsPath}`);
+					await openMergeFor(ext, document.uri.fsPath);
 				}
 			} catch (err) {
 				stopSpin();
@@ -686,6 +716,8 @@ async function saveAndUpload(ext: ActiveExtension): Promise<void> {
 			void vscode.window.showInformationMessage(`Bitrix Assistant: ${name} загружен на сервер`);
 		} else if (outcome === 'identical') {
 			flashIdentical(name);
+		} else if (outcome === 'merge') {
+			await openMergeFor(ext, uri.fsPath);
 		} else if (outcome === 'excluded') {
 			void vscode.window.showWarningMessage('Bitrix Assistant: файл исключён из синхронизации');
 		}
@@ -797,6 +829,71 @@ function transferProgress(progress: TransferProgressUi): TransferProgress {
 	};
 }
 
+/** Открывает слияние версий для одного файла; без редактора — обычное сравнение. */
+async function openMergeFor(ext: ActiveExtension, localPath: string): Promise<void> {
+	const remotePath = ext.sync.toRemotePath(localPath);
+	if (!remotePath) {
+		void vscode.window.showWarningMessage('Bitrix Assistant: файл вне локального корня проекта');
+		return;
+	}
+	if (!ext.merge.available()) {
+		await vscode.commands.executeCommand('bitrix.ssh.compareRemote', remotePath);
+		return;
+	}
+	const opened = await vscode.window.withProgress(
+		{ location: vscode.ProgressLocation.Notification, title: `Слияние ${path.basename(localPath)}` },
+		() => ext.merge.open(localPath, remotePath),
+	);
+	if (opened) {
+		// «Complete Merge» сохранит результат поверх локального файла — watcher
+		// сохранений по этой отметке предложит загрузить файл на сервер.
+		pendingMerges.add(path.normalize(localPath));
+		return;
+	}
+	void vscode.window.showWarningMessage(
+		'Bitrix Assistant: редактор слияния недоступен — открываю сравнение версий',
+	);
+	await vscode.commands.executeCommand('bitrix.ssh.compareRemote', remotePath);
+}
+
+/** Конфликты пакетной загрузки: один файл — сразу, несколько — выбор из списка. */
+async function mergeConflictFiles(ext: ActiveExtension, files: readonly string[]): Promise<void> {
+	if (files.length === 0) {
+		return;
+	}
+	if (files.length === 1) {
+		await openMergeFor(ext, files[0]);
+		return;
+	}
+	const picked = await vscode.window.showQuickPick(
+		files.map((file) => ({
+			label: path.basename(file),
+			description: vscode.workspace.asRelativePath(file, false),
+			file,
+		})),
+		{
+			title: 'Bitrix Assistant: слияние с сервером',
+			placeHolder: `На сервере новее ${files.length} файл(ов) — выберите файл`,
+		},
+	);
+	if (picked) {
+		await openMergeFor(ext, picked.file);
+	}
+}
+
+async function mergeFile(ext: ActiveExtension, arg?: vscode.Uri): Promise<void> {
+	const uri = targetUri(arg);
+	if (!uri) {
+		void vscode.window.showWarningMessage('Bitrix Assistant: откройте локальный файл для слияния');
+		return;
+	}
+	if (!ext.connections.isConnected) {
+		void vscode.window.showWarningMessage('Bitrix Assistant: нет SSH-подключения');
+		return;
+	}
+	await openMergeFor(ext, uri.fsPath);
+}
+
 async function upload(ext: ActiveExtension, arg?: vscode.Uri): Promise<void> {
 	const uri = targetUri(arg);
 	if (!uri) {
@@ -835,6 +932,8 @@ async function upload(ext: ActiveExtension, arg?: vscode.Uri): Promise<void> {
 			void vscode.window.showInformationMessage(`Bitrix Assistant: ${name} загружен на сервер`);
 		} else if (outcome === 'identical') {
 			flashIdentical(name);
+		} else if (outcome === 'merge') {
+			await openMergeFor(ext, uri.fsPath);
 		} else if (outcome === 'excluded') {
 			void vscode.window.showWarningMessage('Bitrix Assistant: файл исключён из синхронизации');
 		}
@@ -1177,6 +1276,7 @@ async function uploadLocal(ext: ActiveExtension, arg?: RemoteNode | string): Pro
 	try {
 		let uploaded = 0;
 		let skipped = 0;
+		let merged: string[] = [];
 		await vscode.window.withProgress(
 			{
 				location: vscode.ProgressLocation.Notification,
@@ -1192,6 +1292,7 @@ async function uploadLocal(ext: ActiveExtension, arg?: RemoteNode | string): Pro
 				);
 				uploaded = result.uploaded;
 				skipped = result.skipped;
+				merged = result.merged ?? [];
 			},
 		);
 		ext.tree.refresh();
@@ -1204,6 +1305,9 @@ async function uploadLocal(ext: ActiveExtension, arg?: RemoteNode | string): Pro
 		void vscode.window.showInformationMessage(
 			`Bitrix Assistant: загружено файлов ${uploaded}${skipped > 0 ? `, пропущено ${skipped}` : ''}`,
 		);
+		if (merged.length > 0) {
+			await mergeConflictFiles(ext, merged);
+		}
 	} catch (err) {
 		if (err instanceof vscode.CancellationError) {
 			return;

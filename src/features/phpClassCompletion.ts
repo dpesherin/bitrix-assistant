@@ -69,8 +69,11 @@ export class PhpClassCompletionProvider implements vscode.CompletionItemProvider
 		}
 		const tokenStart = position.character - token.length;
 		const previous = tokenStart > 0 ? before[tokenStart - 1] : '';
-		// Не предлагать классы в переменных, после `->` и внутри строк.
-		if (previous === '$' || previous === '>' || previous === ':' || previous === "'" || previous === '"') {
+		// Не предлагать классы в переменных, после `->`/`::` и внутри строк.
+		// Одиночное `:` — это позиция типа (`function f(): Foo`, `catch (`), там
+		// классы нужны; блокируем только `::` (статический вызов).
+		const doubleColon = previous === ':' && before[tokenStart - 2] === ':';
+		if (previous === '$' || previous === '>' || doubleColon || previous === "'" || previous === '"') {
 			return undefined;
 		}
 		// Диапазон замены не включает ведущий `\`: VS Code фильтрует подсказки

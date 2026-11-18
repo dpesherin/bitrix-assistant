@@ -17,6 +17,12 @@ use BitrixLsp\Support\TextDocument;
  */
 final class PhpCompletionProvider
 {
+	/** Объявления после модификаторов: `public func`, `private const`. */
+	private const DECLARATIONS = [
+		'function' => "function \${1:name}(\${2}) {\n\t\$0\n}",
+		'const' => 'const \${1:NAME} = \${2:null};',
+	];
+
 	/** Магические методы: объявление целиком по префиксу `__con`. */
 	private const MAGIC_METHODS = [
 		'__construct',
@@ -41,6 +47,7 @@ final class PhpCompletionProvider
 		private readonly Repository $repository,
 		private readonly PhpTypeInference $inference,
 		private readonly PhpSnippetProvider $snippets = new PhpSnippetProvider(),
+		private readonly PhpTypeCompletion $types = new PhpTypeCompletion(),
 	) {
 	}
 
@@ -64,6 +71,21 @@ final class PhpCompletionProvider
 			return $declaration;
 		}
 
+		// `public func`, `private const` — объявление целиком после модификаторов.
+		$declarations = $this->declarationItems($document, $offset, $before);
+		if ($declarations !== []) {
+			return $declarations;
+		}
+
+		// Встроенные типы PHP в позиции типа: `function f(): str`, `f(str`,
+		// `public ?arr`, `string|arr`. Окно больше обычного: сигнатура может
+		// занимать несколько строк.
+		$typeWindow = substr($document->text, max(0, $offset - 4000), min($offset, 4000));
+		$typeItems = $this->types->provide($document, $offset, $typeWindow);
+		if ($typeItems !== []) {
+			return $typeItems;
+		}
+
 		if (preg_match('/\$arParams\[\s*[\'"]([A-Za-z0-9_]*)$/', $before, $matches) === 1) {
 			return $this->paramItems($document, $offset, $matches[1]);
 		}
@@ -80,7 +102,7 @@ final class PhpCompletionProvider
 			}
 		}
 
-		if (preg_match('/\$([A-Za-z_][A-Za-z0-9_]*)->([A-Za-z_][A-Za-z0-9_]*)?$/', $before, $matches) === 1) {
+		if (preg_match('/\$([A-Za-z_][A-Za-z0-9_]*)\s*->\s*([A-Za-z_][A-Za-z0-9_]*)?$/', $before, $matches) === 1) {
 			$context = PhpDocumentContext::create($document);
 			return $this->methodsForVariable($document, $offset, $context, $matches[1], $matches[2] ?? '');
 		}
@@ -100,7 +122,7 @@ final class PhpCompletionProvider
 			}
 		}
 
-		if (preg_match('/([\\\\A-Za-z0-9_]+)::([A-Za-z_][A-Za-z0-9_]*)?$/', $before, $matches) === 1) {
+		if (preg_match('/([\\\\A-Za-z0-9_]+)\s*::\s*([A-Za-z_][A-Za-z0-9_]*)?$/', $before, $matches) === 1) {
 			$context = PhpDocumentContext::create($document);
 			return $this->methodsForClassName($document, $offset, $context, $matches[1], $matches[2] ?? '');
 		}
@@ -256,6 +278,48 @@ final class PhpCompletionProvider
 	 *
 	 * @return array<int, array<string, mixed>>
 	 */
+	/**
+	 * Объявления членов класса после модификаторов: `public func` → функция,
+	 * `private const` → константа. Без этого на `public func` не было ничего:
+	 * общая ветка подсказок исключает позиции после `public`/`private`.
+	 *
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function declarationItems(TextDocument $document, int $offset, string $before): array
+	{
+		if (preg_match(
+			'/(?:^|[;{}\s])(?:(?:public|protected|private|static|final|abstract|readonly)\s+)+([A-Za-z_][A-Za-z0-9_]*)$/',
+			$before,
+			$matches,
+		) !== 1) {
+			return [];
+		}
+		$prefix = strtolower($matches[1]);
+		$range = $document->range($offset - strlen($matches[1]), $offset);
+		$items = [];
+		foreach (self::DECLARATIONS as $keyword => $snippet) {
+			if (!str_starts_with($keyword, $prefix)) {
+				continue;
+			}
+			$items[] = [
+				'label' => $keyword,
+				'kind' => 15, // Snippet
+				'detail' => 'объявление',
+				'labelDetails' => ['detail' => 'член класса'],
+				'filterText' => $keyword,
+				'sortText' => '0_' . $keyword,
+				'textEdit' => ['range' => $range, 'newText' => $snippet],
+				'insertTextFormat' => 2,
+				'documentation' => self::documentation(
+					$keyword . ' …',
+					'Объявление с телом и полями для подстановки.',
+					[],
+				),
+			];
+		}
+		return $items;
+	}
+
 	private function methodDeclarationItems(TextDocument $document, int $offset, string $before): array
 	{
 		if (preg_match('/(?<![\w$>:\\\\])(__[A-Za-z0-9_]*)$/', $before, $matches) !== 1) {
@@ -493,6 +557,12 @@ final class PhpCompletionProvider
 		string $variable,
 		string $partial,
 	): array {
+		if (strtolower($variable) === 'this') {
+			$class = $context->classAt($offset);
+			if ($class !== null && $this->repository->classByName(ltrim((string) $class['fqcn'], '\\')) === null) {
+				return $this->documentClassItems($document, $offset, $context, $class, $partial);
+			}
+		}
 		foreach ($this->inference->variableCandidates($context, '$' . $variable, $offset) as $candidate) {
 			if ($this->repository->classByName($candidate) !== null) {
 				return $this->memberItems(
@@ -507,6 +577,81 @@ final class PhpCompletionProvider
 			}
 		}
 		return [];
+	}
+
+	/** FQCN предка: из индекса, а для ещё не сохранённого класса — из объявления. */
+	private function parentFqcn(PhpDocumentContext $context, array $class): ?string
+	{
+		$fqcn = ltrim((string) ($class['fqcn'] ?? ''), '\\');
+		$row = $fqcn === '' ? null : $this->repository->classByName($fqcn);
+		if ($row !== null) {
+			return $this->repository->parentClassName($row);
+		}
+		$extends = $class['extends'] ?? null;
+		if (!is_string($extends) || $extends === '') {
+			return null;
+		}
+		foreach ($context->classCandidates($extends) as $candidate) {
+			if ($this->repository->classByName($candidate) !== null) {
+				return $candidate;
+			}
+		}
+		return ltrim($extends, '\\');
+	}
+
+	/**
+	 * Члены класса, которого ещё нет в индексе: методы из документа плюс
+	 * унаследованные от предка, который в индексе уже есть.
+	 *
+	 * @param array<string, mixed> $class
+	 * @return array<int, array<string, mixed>>
+	 */
+	private function documentClassItems(
+		TextDocument $document,
+		int $offset,
+		PhpDocumentContext $context,
+		array $class,
+		string $partial,
+	): array {
+		$range = $document->range($offset - strlen($partial), $offset);
+		$items = [];
+		foreach ((array) ($class['methods'] ?? []) as $method) {
+			$methodName = (string) ($method['name'] ?? '');
+			if ($methodName === '' || str_starts_with($methodName, '__')) {
+				continue;
+			}
+			$params = [];
+			foreach ((array) ($method['params'] ?? []) as $paramName => $paramType) {
+				$params[] = trim((string) $paramType . ' $' . $paramName);
+			}
+			$signature = $methodName . '(' . implode(', ', $params) . ')';
+			$items[] = [
+				'label' => $methodName,
+				'kind' => 2, // Method
+				'detail' => 'метод этого класса',
+				'labelDetails' => ['detail' => self::signatureDetail($signature)],
+				'filterText' => $methodName,
+				'sortText' => '0_' . strtolower($methodName),
+				'textEdit' => ['range' => $range, 'newText' => $methodName . '($0)'],
+				'insertTextFormat' => 2,
+				'documentation' => self::documentation(
+					'function ' . $signature,
+					'Объявление в этом файле.',
+					[],
+				),
+			];
+		}
+		$parent = $this->parentFqcn($context, $class);
+		if ($parent !== null && $this->repository->classByName($parent) !== null) {
+			$seen = array_fill_keys(array_map(static fn (array $item): string => strtolower((string) $item['label']), $items), true);
+			foreach ($this->memberItems($document, $offset, $parent, $partial, false, true, true) as $item) {
+				if (!isset($seen[strtolower((string) $item['label'])])) {
+					$items[] = $item;
+					$seen[strtolower((string) $item['label'])] = true;
+				}
+			}
+		}
+		return $items;
 	}
 
 	/**
@@ -525,14 +670,19 @@ final class PhpCompletionProvider
 			if ($class === null) {
 				return [];
 			}
-			$fqcn = $class['fqcn'];
+			$fqcn = ltrim((string) $class['fqcn'], '\\');
 			if ($lower === 'parent') {
-				$row = $this->repository->classByName($fqcn);
-				$parent = $row !== null ? $this->repository->parentClassName($row) : null;
+				$parent = $this->parentFqcn($context, $class);
 				if ($parent === null) {
 					return [];
 				}
 				$fqcn = $parent;
+			}
+			// Класс ещё не в индексе (файл только создан, не сохранён, untitled):
+			// показываем объявленные в этом документе методы и предка из индекса,
+			// иначе `self::` в новом классе не подсказывал вообще ничего.
+			if ($lower !== 'parent' && $this->repository->classByName($fqcn) === null) {
+				return $this->documentClassItems($document, $offset, $context, $class, $partial);
 			}
 			return $this->memberItems(
 				$document,
@@ -541,7 +691,7 @@ final class PhpCompletionProvider
 				$partial,
 				false,
 				true,
-				strcasecmp(ltrim($context->classAt($offset)['fqcn'] ?? '', '\\'), ltrim($fqcn, '\\')) === 0,
+				strcasecmp(ltrim((string) ($context->classAt($offset)['fqcn'] ?? ''), '\\'), ltrim($fqcn, '\\')) === 0,
 			);
 		}
 		foreach ($context->classCandidates($name) as $candidate) {

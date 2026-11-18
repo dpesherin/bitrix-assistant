@@ -1,5 +1,7 @@
 import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import * as vscode from 'vscode';
 
 type Check = [name: string, run: () => Promise<void> | void];
@@ -120,6 +122,38 @@ export async function run(): Promise<void> {
 						.join('\n');
 				}
 				assert.match(value, /переменная/i, `нет hover переменной: ${value}`);
+			},
+		],
+		[
+			'слияние версий: внутренняя команда _open.mergeEditor открывает редактор',
+			async () => {
+				// MergeService передаёт ровно такой набор аргументов: три временных
+				// файла на входе и локальный файл как output.
+				const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bitrix-merge-'));
+				const name = 'conflict.php';
+				const mine = path.join(dir, `mine-${name}`);
+				const theirs = path.join(dir, name);
+				const base = path.join(dir, `base-${name}`);
+				const output = path.join(dir, `out-${name}`);
+				fs.writeFileSync(mine, '<?php\necho "mine";\n');
+				fs.writeFileSync(theirs, '<?php\necho "server";\n');
+				fs.writeFileSync(base, '');
+				fs.writeFileSync(output, '<?php\n');
+				await vscode.commands.executeCommand('_open.mergeEditor', {
+					base: vscode.Uri.file(base),
+					input1: { uri: vscode.Uri.file(mine), title: 'Моё (локально)' },
+					input2: { uri: vscode.Uri.file(theirs), title: 'На сервере' },
+					output: vscode.Uri.file(output),
+				});
+				const tabOf = (): vscode.Tab | undefined =>
+					vscode.window.tabGroups.all
+						.flatMap((group) => group.tabs)
+						.find((tab) => tab.label.includes(`out-${name}`));
+				await waitFor(() => tabOf() !== undefined, 10000);
+				const tab = tabOf();
+				assert.ok(tab, 'вкладка слияния не открылась');
+				await vscode.window.tabGroups.close(tab, true);
+				fs.rmSync(dir, { recursive: true, force: true });
 			},
 		],
 		[

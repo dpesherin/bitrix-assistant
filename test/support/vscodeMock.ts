@@ -70,6 +70,11 @@ const mock = {
 		onDidChangeConfiguration: () => ({ dispose: () => undefined }),
 	},
 	window: {
+		/** Реальный API: активный и видимые редакторы есть всегда (могут быть пустыми). */
+		activeTextEditor: undefined as
+			| { document: { uri: { fsPath: string; scheme: string } } }
+			| undefined,
+		visibleTextEditors: [] as Array<{ document: { uri: { fsPath: string; scheme: string } } }>,
 		async showWarningMessage(message: string): Promise<string | undefined> {
 			mockState.prompts.push(message);
 			return mockState.promptResult;

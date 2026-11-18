@@ -39,7 +39,14 @@ final class JsCompletionProvider
 	{
 		$from = max(0, $offset - 300);
 		$before = substr($document->text, $from, $offset - $from);
-		if (preg_match('/(?:\bnew\s+)?(BX(?:\.[A-Za-z_$][\w$]*)+)\s*\(\s*\{([^{}]*)$/', $before, $callMatch) === 1) {
+		// Чейнинг в редакторах часто разбит по строкам (`BX.Main\n    .Popup`).
+		// Склеиваем только строки-продолжения (следующая начинается с `.`/`?.`/`->`),
+		// иначе соседние инструкции склеивались в один «получатель».
+		$before = self::joinChainLines($before);
+		// Курсор мог остаться на следующей строке после точки: `BX.Main.` + Enter.
+		// Отбрасываем только хвостовой перевод строки, а не пробелы внутри строки.
+		$before = preg_replace('/[ \t]*\r?\n[ \t]*$/', '', $before) ?? $before;
+		if (preg_match('/(?:\bnew\s+)?(BX(?:[ \t]*\.[ \t]*[A-Za-z_$][\w$]*)+)[ \t]*\([ \t]*\{([^{}]*)$/', $before, $callMatch) === 1) {
 			$items = $this->objectKeyItems($document, $offset, $callMatch[1], $callMatch[2]);
 			if ($items !== []) {
 				return $items;
@@ -64,13 +71,13 @@ final class JsCompletionProvider
 		// Раньше стандартные методы не подсказывались вовсе: анализатор знал
 		// только индекс проекта и модули.
 		if (
-			preg_match('/(?<![\w$.])([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)?$/', $before, $native) === 1 &&
+			preg_match('/(?<![\w$.])([A-Za-z_$][\w$]*)[ \t]*\.[ \t]*([A-Za-z_$][\w$]*)?$/', $before, $native) === 1 &&
 			JsNativeCatalog::isNamespace($native[1])
 		) {
 			return $this->nativeItems($document, $offset, $native[2] ?? '', JsNativeCatalog::namespaceMembers($native[1]));
 		}
 		// DOM: `document.` — методы документа и элемента.
-		if (preg_match('/(?<![\w$.])(document|window)\.([A-Za-z_$][\w$]*)?$/', $before, $dom) === 1) {
+		if (preg_match('/(?<![\w$.])(document|window)[ \t]*\.[ \t]*([A-Za-z_$][\w$]*)?$/', $before, $dom) === 1) {
 			return $this->nativeItems($document, $offset, $dom[2] ?? '', JsNativeCatalog::domMembers('document'));
 		}
 		// Результат DOM-вызова: `document.querySelector('…').` — это элемент,
@@ -95,7 +102,7 @@ final class JsCompletionProvider
 			return $this->nativeItems($document, $offset, $literalMatch[1] ?? '', JsNativeCatalog::prototypeMembers($literalType));
 		}
 		if (
-			preg_match('/([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)?$/', $before, $memberMatch) === 1 &&
+			preg_match('/([A-Za-z_$][\w$]*)[ \t]*\.[ \t]*([A-Za-z_$][\w$]*)?$/', $before, $memberMatch) === 1 &&
 			$memberMatch[1] !== 'this' &&
 			!str_starts_with($memberMatch[1], 'BX')
 		) {
@@ -123,7 +130,11 @@ final class JsCompletionProvider
 				}
 			}
 		}
-		if (preg_match('/(?<![\w$.])([A-Za-z_$][\w$]*)?$/', $before, $localMatch) === 1) {
+		// После точки/стрелки нужны члены получателя, а не локальные имена: иначе
+		// на `BX.Main.` (тем более с переносом строки) выпадал список глобальных
+		// имён и стандартных объектов вместо членов BX.Main.
+		$memberAccess = preg_match('/(?:\.|->|\?\.)\s*$/', $before) === 1;
+		if (!$memberAccess && preg_match('/(?<![\w$.])([A-Za-z_$][\w$]*)?$/', $before, $localMatch) === 1) {
 			$prior = substr($before, 0, strlen($before) - strlen($localMatch[0]));
 			if (preg_match('/(?:^|[^\w$])(?:new|import|from|class|function)\s*$/', $prior) !== 1) {
 				$items = $this->localItems($document, $offset, $localMatch[1] ?? '');
@@ -135,7 +146,7 @@ final class JsCompletionProvider
 		$isNew = false;
 		$container = null;
 		$partial = '';
-		if (preg_match('/\bthis\.([A-Za-z_$][\w$]*)?$/', $before, $matches) === 1) {
+		if (preg_match('/\bthis[ \t]*\.[ \t]*([A-Za-z_$][\w$]*)?$/', $before, $matches) === 1) {
 			$context = JsDocumentContext::create($document);
 			$base = $context->baseAt($offset);
 			if ($base !== null) {
@@ -144,12 +155,12 @@ final class JsCompletionProvider
 			}
 		}
 		if ($container === null) {
-			if (preg_match('/(?:\bnew\s+)BX((?:\.[A-Za-z_$][\w$]*)*)\.([A-Za-z_$][\w$]*)?$/', $before, $matches) === 1) {
+			if (preg_match('/(?:\bnew\s+)BX((?:[ \t]*\.[ \t]*[A-Za-z_$][\w$]*)*)[ \t]*\.[ \t]*([A-Za-z_$][\w$]*)?$/', $before, $matches) === 1) {
 				$isNew = true;
-			} elseif (preg_match('/\bBX((?:\.[A-Za-z_$][\w$]*)*)\.([A-Za-z_$][\w$]*)?$/', $before, $matches) !== 1) {
+			} elseif (preg_match('/\bBX((?:[ \t]*\.[ \t]*[A-Za-z_$][\w$]*)*)[ \t]*\.[ \t]*([A-Za-z_$][\w$]*)?$/', $before, $matches) !== 1) {
 				return [];
 			}
-			$container = 'BX' . ($matches[1] ?? '') . '.';
+			$container = 'BX' . preg_replace('/\s+/', '', (string) ($matches[1] ?? '')) . '.';
 			$partial = $matches[2] ?? '';
 		}
 		$rows = $this->repository->childSegments($container, 2000, $partial);
@@ -607,5 +618,31 @@ final class JsCompletionProvider
 			return 'number';
 		}
 		return null;
+	}
+
+	/**
+	 * Склеивает строки-продолжения чейнинга: `BX.Main` + `    .Popup` → `BX.Main.Popup`.
+	 * Соседние инструкции не трогаются — иначе `p.exec` и `new Profile()` ниже
+	 * склеивались бы в одно несуществующее имя.
+	 */
+	private static function joinChainLines(string $text): string
+	{
+		$lines = explode("\n", $text);
+		$result = [];
+		$count = count($lines);
+		for ($index = 0; $index < $count; $index++) {
+			$line = $lines[$index];
+			$next = $index + 1 < $count ? $lines[$index + 1] : null;
+			if (
+				$next !== null
+				&& preg_match('/^[ \t]*(?:\.|\?\.|->)/', $next) === 1
+				&& preg_match('/[A-Za-z0-9_$)\]]\s*$/', $line) === 1
+			) {
+				$lines[$index + 1] = rtrim($line) . ltrim($next);
+				continue;
+			}
+			$result[] = $line;
+		}
+		return implode("\n", $result);
 	}
 }

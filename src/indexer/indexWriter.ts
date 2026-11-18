@@ -3,9 +3,9 @@ import * as path from 'node:path';
 import { toPosix } from '../util/glob';
 import { Database } from './db';
 import { JsExtensionConfig, parseJsConfig } from './js/jsConfigParser';
-import { scanJsGlobals, scanJsTypeShapes } from './js/jsScanner';
+import { JsGlobal, JsTypeShape, scanJsGlobals, scanJsTypeShapes } from './js/jsScanner';
 import { componentLocation, parseParametersPhp } from './php/componentParser';
-import { parsePhpFile } from './php/phpParser';
+import { ParsedPhpFile, parsePhpFile } from './php/phpParser';
 
 /**
  * Запись индекса в SQLite. Никаких зависимостей от VS Code API — этот модуль
@@ -138,15 +138,24 @@ export class IndexWriter {
 	}
 
 	writeJsFile(file: string, extensionName?: string): void {
-		let content: string;
-		try {
-			content = fs.readFileSync(file, 'utf8');
-		} catch (err) {
-			this.onError(`js ${file}: ${err instanceof Error ? err.message : String(err)}`);
+		const content = readTextFile(file, 'js', this.onError);
+		if (content === undefined) {
 			return;
 		}
-		const globals = scanJsGlobals(content);
-		const shapes = scanJsTypeShapes(content);
+		this.writeScannedJs({
+			file,
+			globals: scanJsGlobals(content),
+			shapes: scanJsTypeShapes(content),
+			extensionName,
+		});
+	}
+
+	/**
+	 * Запись разобранного JS-файла. Разбор может идти в worker-потоке
+	 * (см. `parsePool`), поэтому сканирование отделено от записи в базу.
+	 */
+	writeScannedJs(input: ScannedJsFileInput): void {
+		const { file, globals, shapes, extensionName } = input;
 		this.db.transaction(() => {
 			this.db.run('DELETE FROM js_globals WHERE source_file = ?', file);
 			this.db.run('DELETE FROM js_types WHERE source_file = ?', file);
@@ -319,14 +328,19 @@ export class IndexWriter {
 	}
 
 	writePhpFile(file: string): void {
-		let content: string;
-		try {
-			content = fs.readFileSync(file, 'utf8');
-		} catch (err) {
-			this.onError(`php ${file}: ${err instanceof Error ? err.message : String(err)}`);
+		const content = readPhpFile(file, this.onError);
+		if (content === undefined) {
 			return;
 		}
-		const parsed = parsePhpFile(content);
+		this.writeParsedPhpFile({ file, content, parsed: parsePhpFile(content) });
+	}
+
+	/**
+	 * Запись уже разобранного PHP-файла. Разбор может идти в worker-потоке
+	 * (см. `parsePool`), поэтому чтение и разбор отделены от записи в базу.
+	 */
+	writeParsedPhpFile(input: ParsedPhpFileInput): void {
+		const { file, content, parsed } = input;
 		const module = moduleFromPath(file);
 		this.db.transaction(() => {
 			this.db.run('DELETE FROM php_functions WHERE file = ?', file);
@@ -561,4 +575,38 @@ function moduleFromPath(file: string): string | undefined {
 	const posix = toPosix(file);
 	const m = /\/modules\/([^/]+)\//.exec(posix);
 	return m ? m[1] : undefined;
+}
+
+/** Результат разбора файла — то, что воркер присылает в основной поток. */
+export interface ParsedPhpFileInput {
+	file: string;
+	content: string;
+	parsed: ParsedPhpFile;
+}
+
+/** Результат сканирования JS-файла — то, что воркер присылает в основной поток. */
+export interface ScannedJsFileInput {
+	file: string;
+	globals: JsGlobal[];
+	shapes: JsTypeShape[];
+	extensionName?: string;
+}
+
+/** Чтение PHP-файла с сообщением об ошибке через onError; undefined — не прочитался. */
+export function readPhpFile(file: string, onError: (message: string) => void): string | undefined {
+	return readTextFile(file, 'php', onError);
+}
+
+/** Чтение текстового файла индекса с сообщением об ошибке; undefined — не прочитался. */
+export function readTextFile(
+	file: string,
+	kind: string,
+	onError: (message: string) => void,
+): string | undefined {
+	try {
+		return fs.readFileSync(file, 'utf8');
+	} catch (err) {
+		onError(`${kind} ${file}: ${err instanceof Error ? err.message : String(err)}`);
+		return undefined;
+	}
 }

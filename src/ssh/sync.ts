@@ -7,18 +7,21 @@ import { errorMessage, log } from '../log';
 import { readSettings } from '../settings';
 import { isExcluded, toPosix } from '../util/glob';
 import { mapPool } from '../util/pool';
+import { BaseSnapshots } from './baseSnapshot';
 import { ByteProgress, SshConnectionManager } from './connection';
 import { RemoteEntry } from './types';
 
 export type SyncMode = 'both' | 'upload' | 'download';
 
 /** Итог одиночной загрузки файла. */
-export type UploadOutcome = 'uploaded' | 'identical' | 'excluded' | 'cancelled';
+export type UploadOutcome = 'uploaded' | 'identical' | 'excluded' | 'cancelled' | 'merge';
 
 export interface SyncResult {
 	uploaded: number;
 	downloaded: number;
 	skipped: number;
+	/** Файлы с конфликтом версий, для которых пользователь выбрал слияние вручную. */
+	merged?: string[];
 }
 
 /** Ход переноса каталога: сколько файлов и байт уже позади. */
@@ -93,7 +96,15 @@ export class SyncService {
 	/** Каталоги, которые уже точно есть на сервере: экономит stat при каждой загрузке. */
 	private readonly knownDirs = new Set<string>();
 
-	constructor(private readonly connections: SshConnectionManager) {}
+	constructor(
+		private readonly connections: SshConnectionManager,
+		private readonly bases?: BaseSnapshots,
+	) {}
+
+	/** Запоминает только что синхронизированную версию — база для будущего слияния. */
+	private async rememberBase(remotePath: string, localPath: string): Promise<void> {
+		await this.bases?.remember(this.connections.activeProfile, remotePath, localPath);
+	}
 
 	private localRootFor(localPath?: string): string | undefined {
 		const profile = this.connections.activeProfile;
@@ -169,6 +180,7 @@ export class SyncService {
 		if (this.knownDirs.has(remoteDir)) {
 			try {
 				await this.uploadAtomic(localPath, remotePath, progress);
+				await this.rememberBase(remotePath, localPath);
 				return 'uploaded';
 			} catch (err) {
 				// Каталог могли удалить на сервере: пересоздаём и повторяем один раз.
@@ -178,6 +190,7 @@ export class SyncService {
 		}
 		await this.ensureRemoteDir(remoteDir, this.knownDirs);
 		await this.uploadAtomic(localPath, remotePath, progress);
+		await this.rememberBase(remotePath, localPath);
 		return 'uploaded';
 	}
 
@@ -228,7 +241,7 @@ export class SyncService {
 	private async confirmOverwrite(
 		localPath: string,
 		remotePath: string,
-	): Promise<'upload' | 'identical' | 'cancelled'> {
+	): Promise<'upload' | 'identical' | 'cancelled' | 'merge'> {
 		const remote = await this.connections.stat(remotePath);
 		const local = await this.statOrUndefined(localPath);
 		if (!remote || remote.mtime === undefined || !local) {
@@ -243,11 +256,18 @@ export class SyncService {
 			return 'identical';
 		}
 		const choice = await vscode.window.showWarningMessage(
-			`На сервере файл новее локального: ${remotePath}. Перезаписать?`,
-			{ modal: true },
+			`На сервере файл новее локального: ${remotePath}`,
+			{
+				modal: true,
+				detail: 'Перезаписать серверную версию, слить обе версии в редакторе слияния или отменить загрузку.',
+			},
 			'Перезаписать',
+			'Слить вручную',
 		);
-		return choice === 'Перезаписать' ? 'upload' : 'cancelled';
+		if (choice === 'Перезаписать') {
+			return 'upload';
+		}
+		return choice === 'Слить вручную' ? 'merge' : 'cancelled';
 	}
 
 	private async uploadAtomic(localPath: string, remotePath: string, progress?: ByteProgress): Promise<void> {
@@ -304,15 +324,23 @@ export class SyncService {
 		return newer;
 	}
 
-	/** Один общий вопрос на пакет; true — перезаписать все конфликтные файлы. */
-	private async confirmBulkOverwrite(count: number): Promise<boolean> {
+	/** Один общий вопрос на пакет: перезаписать, пропустить или слить конфликты вручную. */
+	private async confirmBulkOverwrite(count: number): Promise<'overwrite' | 'skip' | 'merge'> {
 		const choice = await vscode.window.showWarningMessage(
-			`На сервере новее ${count} файл(ов). Перезаписать их?`,
-			{ modal: true },
+			`На сервере новее ${count} файл(ов)`,
+			{
+				modal: true,
+				detail:
+					'Перезаписать серверные версии, пропустить их или загрузить остальные, а конфликтные слить вручную.',
+			},
 			'Перезаписать все',
 			'Пропустить новые',
+			'Слить по одному',
 		);
-		return choice === 'Перезаписать все';
+		if (choice === 'Перезаписать все') {
+			return 'overwrite';
+		}
+		return choice === 'Слить по одному' ? 'merge' : 'skip';
 	}
 
 	async download(remotePath: string, localPath?: string, progress?: ByteProgress): Promise<string | undefined> {
@@ -324,6 +352,7 @@ export class SyncService {
 			return undefined;
 		}
 		await this.connections.fastGet(remotePath, target, progress);
+		await this.rememberBase(remotePath, target);
 		return target;
 	}
 
@@ -351,6 +380,7 @@ export class SyncService {
 			}
 			const meter = new Meter(1, info.size, onProgress);
 			await this.connections.fastGet(remotePath, target, meter.fileProgress());
+			await this.rememberBase(remotePath, target);
 			meter.fileDone();
 			meter.finish();
 			return { uploaded: 0, downloaded: 1, skipped: 0 };
@@ -374,6 +404,7 @@ export class SyncService {
 				return;
 			}
 			await this.connections.fastGet(entry.path, target, meter.fileProgress());
+			await this.rememberBase(entry.path, target);
 			downloaded++;
 			meter.fileDone();
 		});
@@ -403,6 +434,9 @@ export class SyncService {
 			}
 			meter.fileDone();
 			meter.finish();
+			if (outcome === 'merge') {
+				return { uploaded: 0, downloaded: 0, skipped: 1, merged: [localPath] };
+			}
 			const uploaded = outcome === 'uploaded';
 			return { uploaded: uploaded ? 1 : 0, downloaded: 0, skipped: uploaded ? 0 : 1 };
 		}
@@ -422,7 +456,8 @@ export class SyncService {
 			totalBytes += size;
 		}
 		const conflicts = await this.newerOnServer(files);
-		const skipConflicts = conflicts.size > 0 && !(await this.confirmBulkOverwrite(conflicts.size));
+		const decision = conflicts.size > 0 ? await this.confirmBulkOverwrite(conflicts.size) : 'overwrite';
+		const skipConflicts = decision !== 'overwrite';
 		const meter = new Meter(files.length, totalBytes, onProgress);
 		const dirs = new Set<string>();
 		let uploaded = 0;
@@ -439,11 +474,17 @@ export class SyncService {
 			}
 			await this.ensureRemoteDir(path.posix.dirname(remotePath), dirs);
 			await this.uploadAtomic(file, remotePath, meter.fileProgress());
+			await this.rememberBase(remotePath, file);
 			uploaded++;
 			meter.fileDone();
 		});
 		meter.finish();
-		return { uploaded, downloaded: 0, skipped };
+		return {
+			uploaded,
+			downloaded: 0,
+			skipped,
+			...(decision === 'merge' ? { merged: [...conflicts].sort() } : {}),
+		};
 	}
 
 	async syncAll(
@@ -517,6 +558,7 @@ export class SyncService {
 			if (!localStat) {
 				if (mode !== 'upload') {
 					await this.connections.fastGet(entry.path, localPath);
+					await this.rememberBase(entry.path, localPath);
 					result.downloaded++;
 				}
 				continue;
@@ -530,6 +572,7 @@ export class SyncService {
 			if (mode === 'download' || (mode === 'both' && remoteSeconds > localSeconds)) {
 				if (remoteSeconds > localSeconds) {
 					await this.connections.fastGet(entry.path, localPath);
+					await this.rememberBase(entry.path, localPath);
 					result.downloaded++;
 					continue;
 				}
@@ -538,6 +581,7 @@ export class SyncService {
 				if (localSeconds > remoteSeconds) {
 					await this.ensureRemoteDir(path.posix.dirname(entry.path), dirs);
 					await this.uploadAtomic(localPath, entry.path);
+					await this.rememberBase(entry.path, localPath);
 					result.uploaded++;
 					continue;
 				}
@@ -560,6 +604,7 @@ export class SyncService {
 				}
 				await this.ensureRemoteDir(path.posix.dirname(remotePath), dirs);
 				await this.uploadAtomic(localFile, remotePath);
+				await this.rememberBase(remotePath, localFile);
 				result.uploaded++;
 			}
 		}

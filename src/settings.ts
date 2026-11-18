@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 export interface BitrixSettings {
 	uploadOnSave: boolean;
 	downloadOnOpen: boolean;
+	sshMergeEditor: boolean;
 	sshExclude: string[];
 	sshAutoConnect: boolean;
 	sshConcurrency: number;
@@ -11,6 +12,7 @@ export interface BitrixSettings {
 	indexVendor: boolean;
 	bitrixPath: string;
 	indexExclude: string[];
+	indexThreads: number;
 	jsMaxFileSizeKb: number;
 	jsLibraryCheck: boolean;
 	lspEnabled: boolean;
@@ -33,6 +35,7 @@ export function readSettings(scope?: vscode.Uri): BitrixSettings {
 	return {
 		uploadOnSave: Boolean(ssh.uploadOnSave ?? false),
 		downloadOnOpen: Boolean(ssh.downloadOnOpen ?? false),
+		sshMergeEditor: Boolean(ssh.mergeEditor ?? true),
 		sshExclude: Array.isArray(ssh.exclude) ? (ssh.exclude as string[]) : [],
 		sshAutoConnect: Boolean(ssh.autoConnect ?? false),
 		sshConcurrency: Number(ssh.concurrency ?? 4),
@@ -41,6 +44,7 @@ export function readSettings(scope?: vscode.Uri): BitrixSettings {
 		indexVendor: Boolean(index.vendor ?? true),
 		bitrixPath: String(index.bitrixPath ?? 'bitrix'),
 		indexExclude: Array.isArray(index.exclude) ? (index.exclude as string[]) : [],
+		indexThreads: Number(index.threads ?? 0),
 		jsMaxFileSizeKb: Number(index.jsMaxFileSizeKb ?? 512),
 		jsLibraryCheck: Boolean(js.enableLibraryCheck ?? false),
 		lspEnabled: Boolean(lsp.enabled ?? true),

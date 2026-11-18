@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import { after, before, test } from 'node:test';
+import { BaseSnapshots } from '../src/ssh/baseSnapshot';
 import { SshConnectionManager } from '../src/ssh/connection';
 import { ProfileStore } from '../src/ssh/profiles';
 import { SyncService } from '../src/ssh/sync';
@@ -15,6 +16,8 @@ import { TestSftpServer } from './support/sftpServer';
 
 const server = new TestSftpServer();
 let siteDir = '';
+let snapshotDir = '';
+let bases: BaseSnapshots;
 let manager: SshConnectionManager;
 let sync: SyncService;
 
@@ -63,8 +66,10 @@ before(async () => {
 	};
 	mockState.prompts = [];
 	mockState.promptResult = undefined;
+	snapshotDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bitrix-base-'));
+	bases = new BaseSnapshots(snapshotDir);
 	manager = new SshConnectionManager(store);
-	sync = new SyncService(manager);
+	sync = new SyncService(manager, bases);
 	await manager.connect(profile());
 });
 
@@ -72,6 +77,7 @@ after(async () => {
 	await manager.disconnect();
 	await server.close();
 	fs.rmSync(siteDir, { recursive: true, force: true });
+	fs.rmSync(snapshotDir, { recursive: true, force: true });
 });
 
 test('sftp: атомарная загрузка без временных файлов', async () => {
@@ -115,6 +121,53 @@ test('sftp: одинаковое содержимое — не конфликт,
 	assert.equal(mockState.prompts.length, 0);
 });
 
+test('снимок для слияния: пишется после загрузки и обновляется после скачивания', async () => {
+	writeLocal('snap.php', 'base-v1');
+	assert.equal(await sync.upload(path.join(siteDir, 'snap.php')), 'uploaded');
+	assert.equal((await bases.read(profile(), '/site/snap.php'))?.toString(), 'base-v1');
+
+	fs.writeFileSync(path.join(server.root, 'site', 'snap.php'), 'server-v2');
+	await sync.download('/site/snap.php');
+	assert.equal((await bases.read(profile(), '/site/snap.php'))?.toString(), 'server-v2');
+	assert.equal(fs.readFileSync(path.join(siteDir, 'snap.php'), 'utf8'), 'server-v2');
+});
+
+test('снимок для слияния: файлы больше лимита не снимаются', async () => {
+	writeLocal('big.php', 'x'.repeat(BaseSnapshots.MAX_BYTES + 1));
+	assert.equal(await sync.upload(path.join(siteDir, 'big.php')), 'uploaded');
+	assert.equal(await bases.read(profile(), '/site/big.php'), undefined);
+});
+
+test('снимок для слияния: уборка удаляет старые и держит бюджет', async () => {
+	const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'bitrix-base-prune-'));
+	const day = 24 * 60 * 60 * 1000;
+	const oldBucket = path.join(directory, 'old');
+	fs.mkdirSync(oldBucket, { recursive: true });
+	const old = path.join(oldBucket, 'old.php');
+	fs.writeFileSync(old, 'old');
+	const past = new Date(Date.now() - 40 * day);
+	fs.utimesSync(old, past, past);
+
+	// Бюджет 10 байт: три свежих снимка по 8 → остаётся только самый новый.
+	const newest = path.join(directory, 'new');
+	fs.mkdirSync(newest, { recursive: true });
+	const ages = [3, 2, 1];
+	for (const [index, age] of ages.entries()) {
+		const file = path.join(newest, `f${index}.php`);
+		fs.writeFileSync(file, '12345678');
+		const time = new Date(Date.now() - age * day);
+		fs.utimesSync(file, time, time);
+	}
+
+	const snapshots = new BaseSnapshots(directory, { maxTotalBytes: 10 });
+	await snapshots.pruneIfDue();
+	assert.equal(fs.existsSync(old), false, 'старый снимок должен быть удалён');
+	assert.equal(fs.existsSync(path.join(newest, 'f2.php')), true, 'самый новый снимок остаётся');
+	assert.equal(fs.existsSync(path.join(newest, 'f1.php')), false);
+	assert.equal(fs.existsSync(path.join(newest, 'f0.php')), false);
+	fs.rmSync(directory, { recursive: true, force: true });
+});
+
 test('сравнение с сервером: по содержимому, без mtime', async () => {
 	const file = writeLocal('cmp.php', 'same');
 	assert.equal(await sync.upload(file), 'uploaded');
@@ -139,6 +192,33 @@ test('sftp: каталог — один общий вопрос и пропус�
 	assert.ok(mockState.prompts[0].includes('1'));
 	assert.equal(read('dir/one.php'), 'one');
 	assert.ok(result.skipped >= 1);
+});
+
+test('sftp: конфликт — «Слить вручную» ничего не загружает', async () => {
+	writeLocal('a.php', 'v4');
+	makeRemoteNewer('a.php');
+	mockState.promptResult = 'Слить вручную';
+	assert.equal(await sync.upload(path.join(siteDir, 'a.php')), 'merge');
+	assert.equal(read('a.php'), 'v3');
+});
+
+test('sftp: uploadEntry отдаёт конфликтный файл для слияния', async () => {
+	mockState.promptResult = 'Слить вручную';
+	const result = await sync.uploadEntry(path.join(siteDir, 'a.php'));
+	assert.equal(result.uploaded, 0);
+	assert.equal(result.merged?.length, 1);
+	assert.equal(path.basename(result.merged?.[0] ?? ''), 'a.php');
+	assert.equal(read('a.php'), 'v3');
+});
+
+test('sftp: каталог — «Слить по одному» пропускает конфликты и отдаёт список', async () => {
+	writeLocal('dir/one.php', 'one-merge');
+	makeRemoteNewer('dir/one.php');
+	mockState.promptResult = 'Слить по одному';
+	const result = await sync.uploadEntry(path.join(siteDir, 'dir'));
+	assert.equal(result.merged?.length, 1);
+	assert.equal(path.basename(result.merged?.[0] ?? ''), 'one.php');
+	assert.equal(read('dir/one.php'), 'one');
 });
 
 test('sftp: upload каталога не доходит до fastPut (внятная ошибка вместо EISDIR)', async () => {
