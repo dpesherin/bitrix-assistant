@@ -394,6 +394,7 @@ function parseClassMembers(
 	starts: number[],
 	bodyOpen: number,
 	bodyClose: number,
+	kind: PhpClassKind,
 ): { properties: ParsedProperty[]; constants: ParsedConstant[]; traits: string[] } {
 	const properties: ParsedProperty[] = [];
 	const constants: ParsedConstant[] = [];
@@ -453,6 +454,30 @@ function parseClassMembers(
 			doc: doc?.text,
 			line: lineAt(starts, abs),
 		});
+	}
+
+	// Значения enum (`case Active = 'active';`) — тоже члены класса: без них
+	// после `Status::` нечего подсказывать, а `$enum->value` не с чем связать.
+	if (kind === 'enum') {
+		const caseRe =
+			/^[ \t]*(?:#\[[^\n]*\]\s*)*case\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:=\s*([^;]+))?;/gm;
+		for (let match = caseRe.exec(body); match; match = caseRe.exec(body)) {
+			const abs = bodyOpen + match.index;
+			if (depthAt(masked, bodyOpen, abs) !== 1) {
+				continue;
+			}
+			const doc = findDocblock(docblocks, abs, masked);
+			const equals = match[0].indexOf('=');
+			const value =
+				equals === -1 ? undefined : content.slice(abs + equals + 1, abs + match[0].length - 1).trim();
+			constants.push({
+				name: match[1],
+				type: 'case',
+				value: value || undefined,
+				doc: doc?.text,
+				line: lineAt(starts, abs),
+			});
+		}
 	}
 
 	const traitRe = /^[ \t]*use\s+([A-Za-z0-9_\\,\s]+);/gm;
@@ -917,7 +942,7 @@ export function parsePhpFile(content: string): ParsedPhpFile {
 			});
 		}
 
-		const members = parseClassMembers(content, masked, docblocks, starts, bodyOpen, bodyClose);
+		const members = parseClassMembers(content, masked, docblocks, starts, bodyOpen, bodyClose, kind);
 		const extendsShort = extendsName?.split('\\').pop();
 		classes.push({
 			fqcn: classNamespace ? `${classNamespace}\\${name}` : name,

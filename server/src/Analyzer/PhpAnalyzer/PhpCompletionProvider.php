@@ -49,6 +49,13 @@ final class PhpCompletionProvider
 	 */
 	public function provide(TextDocument $document, int $offset): array
 	{
+		// Открывающий тег набирается раньше, чем начинается PHP-код: `<?`,
+		// `<?=`, `<php` — сразу готовый сниппет с закрывающим тегом.
+		$tags = $this->tagItems($document, $offset);
+		if ($tags !== []) {
+			return $tags;
+		}
+
 		$from = max(0, $offset - 300);
 		$before = substr($document->text, $from, $offset - $from);
 
@@ -155,6 +162,76 @@ final class PhpCompletionProvider
 		// (src/features/phpClassCompletion.ts): он умеет вставлять `use`
 		// и не конфликтует с определением слова в PHP (обратный слэш).
 		return [];
+	}
+
+	/**
+	 * Открывающие теги PHP по мере набора: `<`, `<?`, `<?=`, `<php`.
+	 * Выбор вставляет тег сразу с закрывающим тегом.
+	 *
+	 * @return array<int, array<string, mixed>>
+	 */
+	public function tagItems(TextDocument $document, int $offset): array
+	{
+		$from = max(0, $offset - 16);
+		$before = substr($document->text, $from, $offset - $from);
+		if (preg_match('/(<|<ph(?:p)?|<\?(?:p(?:h(?:p)?)?|=)?)$/i', $before, $matches) !== 1) {
+			return [];
+		}
+		$token = $matches[1];
+		$tokenStart = $offset - strlen($token);
+		// Если перед `<` уже открыт PHP-блок, это оператор сравнения, а не тег.
+		$prefix = substr($document->text, 0, max(0, $tokenStart));
+		$open = strrpos($prefix, '<?');
+		$close = strrpos($prefix, '?>');
+		if ($open !== false && ($close === false || $open > $close)) {
+			return [];
+		}
+		$typed = strtolower($token);
+		$variants = [
+			'<?php' => [
+				'label' => '<?php',
+				'newText' => '<?php $0 ?>',
+				'sort' => '0_php',
+				'doc' => '`<?php … ?>` — блок PHP в шаблоне. Вставляется сразу с закрывающим `?>`.',
+			],
+			'<?=' => [
+				'label' => '<?=',
+				'newText' => '<?= $0 ?>',
+				'sort' => '1_echo',
+				'doc' => '`<?= … ?>` — короткий вывод значения. Вставляется сразу с закрывающим `?>`.',
+			],
+			'<?' => [
+				'label' => '<?',
+				'newText' => '<? $0 ?>',
+				'sort' => '2_short',
+				'doc' => '`<? … ?>` — короткий открывающий тег. Вставляется сразу с закрывающим `?>`.',
+			],
+		];
+		$range = $document->range($tokenStart, $offset);
+		$items = [];
+		foreach ($variants as $tag => $variant) {
+			// `<php`/`<ph` — частая опечатка вместо `<?php`; остальные варианты
+			// подбираются по префиксу набранного тега.
+			$matchesTyped = $typed === '<' || (
+				str_starts_with($typed, '<?')
+					? str_starts_with($tag, $typed)
+					: $tag === '<?php'
+			);
+			if (!$matchesTyped) {
+				continue;
+			}
+			$items[] = [
+				'label' => $variant['label'],
+				'kind' => 14, // CompletionItemKind.Keyword
+				'detail' => 'открывающий тег PHP',
+				'filterText' => $token,
+				'sortText' => $variant['sort'],
+				'textEdit' => ['range' => $range, 'newText' => $variant['newText']],
+				'insertTextFormat' => 2,
+				'documentation' => ['kind' => 'markdown', 'value' => $variant['doc']],
+			];
+		}
+		return $items;
 	}
 
 	/**
@@ -498,6 +575,21 @@ final class PhpCompletionProvider
 		$range = $document->range($offset - strlen($partial), $offset);
 		$items = [];
 		$seen = [];
+		// Enum: значения (`case`) индексируются как константы, а `->name` и
+		// `->value` — встроенные readonly-свойства самого enum, а не объявленные.
+		$classRow = $this->repository->classByName($class);
+		$isEnum = $classRow !== null && strtolower((string) ($classRow['kind'] ?? '')) === 'enum';
+		$enumConstants = $isEnum ? $this->repository->constantsForClassWithParents($class) : [];
+		$enumBacked = false;
+		foreach ($enumConstants as $enumConstant) {
+			if (
+				(string) ($enumConstant['type'] ?? '') === 'case'
+				&& trim((string) ($enumConstant['value'] ?? '')) !== ''
+			) {
+				$enumBacked = true;
+				break;
+			}
+		}
 		// Фильтрацию по введённому префиксу делает VS Code (filterText): если
 		// отфильтровать на сервере и не останется совпадений, редактор добавит
 		// «слова» из всех открытых файлов — в большом проекте это сотни чужих имён.
@@ -595,8 +687,44 @@ final class PhpCompletionProvider
 			}
 		}
 
+		if ($isEnum && $includeProperties) {
+			$virtual = [
+				'name' => [
+					'type' => 'string',
+					'doc' => 'Имя варианта enum.',
+				],
+			];
+			if ($enumBacked) {
+				$virtual['value'] = [
+					'type' => 'int|string',
+					'doc' => 'Значение варианта backed-enum (то, что записано после `=`).',
+				];
+			}
+			foreach ($virtual as $name => $info) {
+				if (isset($seen[$name])) {
+					continue;
+				}
+				$items[] = [
+					'label' => $name,
+					'kind' => 10,
+					'detail' => $owner,
+					'labelDetails' => ['detail' => ': ' . $info['type']],
+					'filterText' => $name,
+					'sortText' => '0_' . $name,
+					'textEdit' => ['range' => $range, 'newText' => $name],
+					'documentation' => self::documentation(
+						'public readonly ' . $info['type'] . ' $' . $name,
+						$info['doc'],
+						['Класс' => $owner],
+					),
+				];
+				$seen[$name] = true;
+			}
+		}
+
 		if ($includeConstants) {
-			foreach ($this->repository->constantsForClassWithParents($class) as $constant) {
+			$constants = $isEnum ? $enumConstants : $this->repository->constantsForClassWithParents($class);
+			foreach ($constants as $constant) {
 				$name = (string) $constant['name'];
 				if (!$matches($name) || isset($seen[$name])) {
 					continue;
@@ -604,16 +732,18 @@ final class PhpCompletionProvider
 				$declaredIn = ltrim((string) ($constant['class_fqcn'] ?? $class), '\\');
 				$value = trim((string) ($constant['value'] ?? ''));
 				$docInfo = DocBlock::parse((string) ($constant['doc'] ?? ''));
+				$isCase = (string) ($constant['type'] ?? '') === 'case';
 				$items[] = [
 					'label' => $name,
-					'kind' => 21,
+					'kind' => $isCase ? 20 : 21, // EnumMember / Constant
 					'detail' => $declaredIn,
 					'labelDetails' => ['detail' => $value !== '' ? '= ' . self::shortValue($value, 24) : ''],
 					'filterText' => $name,
 					'sortText' => $sortGroup($name, $declaredIn) . '_' . strtolower($name),
 					'textEdit' => ['range' => $range, 'newText' => $name],
 					'documentation' => self::documentation(
-						'const ' . $name . ($value !== '' ? ' = ' . self::shortValue($value, 120) : ''),
+						($isCase ? 'case ' : 'const ') . $name
+							. ($value !== '' ? ' = ' . self::shortValue($value, 120) : ''),
 						$docInfo['description'],
 						['Класс' => $declaredIn],
 						$constant['file'] ?? null,

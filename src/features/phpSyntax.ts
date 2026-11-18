@@ -18,6 +18,7 @@ import {
 import { parseLintOutput } from './phpLint';
 import { isExcluded } from '../util/glob';
 import { ProjectPhpStore } from '../php/projectPhp';
+import { startsWithPhpTag } from './phpContext';
 
 /** Проверка синтаксиса PHP выбранным бинарником (`php -l`). */
 export class PhpSyntaxChecker implements vscode.Disposable {
@@ -86,7 +87,7 @@ export class PhpSyntaxChecker implements vscode.Disposable {
 	private schedule(document: vscode.TextDocument): void {
 		if (document.uri.scheme === 'untitled' && document.languageId !== 'php') {
 			const text = document.getText();
-			if (text.trimStart().startsWith('<?php')) {
+			if (startsWithPhpTag(text)) {
 				const key = document.uri.toString();
 				if (!this.switching.has(key)) {
 					this.switching.add(key);
@@ -101,7 +102,7 @@ export class PhpSyntaxChecker implements vscode.Disposable {
 		}
 		const untitledPhp =
 			document.uri.scheme === 'untitled' &&
-			(document.languageId === 'php' || document.getText().trimStart().startsWith('<?php'));
+			(document.languageId === 'php' || startsWithPhpTag(document.getText()));
 		if (
 			(!untitledPhp && document.uri.scheme !== 'file') ||
 			(!untitledPhp && document.languageId !== 'php') ||

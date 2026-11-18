@@ -11,3 +11,12 @@ export function isInsidePhpTag(text: string, offset: number): boolean {
 	const close = before.lastIndexOf('?>');
 	return open !== -1 && (close === -1 || open > close);
 }
+
+/**
+ * Документ начинается с открывающего тега PHP — в том числе недописанного:
+ * `<?`, `<?=`, `<ph`, `<php`. Нужно для untitled: раньше язык переключался
+ * только после полного `<?php`, и подсказки на `<?` не появлялись.
+ */
+export function startsWithPhpTag(text: string): boolean {
+	return /^<(?:\?(?:php(?![A-Za-z])|=|(?![A-Za-z]))|php?(?![A-Za-z]))/i.test(text.trimStart());
+}

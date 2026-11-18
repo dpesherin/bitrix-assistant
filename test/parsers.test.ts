@@ -407,6 +407,47 @@ class OldTable extends \\Bitrix\\Main\\ORM\\Data\\DataManager
 	assert.equal(cls.methods[2].deprecated, true);
 });
 
+test('PHP: значения enum индексируются как case-константы', () => {
+	const php = `<?php
+namespace Vendor\\Module;
+
+enum Status: string
+{
+	case Active = 'active';
+	case Blocked = 'blocked';
+
+	public function label(): string
+	{
+		switch ($this) {
+			case self::Active:
+				return 'Активен';
+		}
+		return '';
+	}
+}
+
+enum Direction
+{
+	case Up;
+	case Down;
+}`;
+	const parsed = parsePhpFile(php);
+	assert.equal(parsed.classes.length, 2);
+	const status = parsed.classes[0];
+	assert.equal(status.kind, 'enum');
+	assert.deepEqual(
+		status.constants.map((constant) => [constant.name, constant.type, constant.value]),
+		[
+			['Active', 'case', "'active'"],
+			['Blocked', 'case', "'blocked'"],
+		],
+	);
+	// `case self::Active:` внутри метода не должен попасть в члены enum.
+	assert.equal(parsed.classes[1].constants.length, 2);
+	assert.equal(parsed.classes[1].constants[0].type, 'case');
+	assert.equal(parsed.classes[1].constants[0].value, undefined);
+});
+
 test('компонент: путь и параметры', () => {
 	const file = '/site/bitrix/components/bitrix/news.list/.parameters.php';
 	const location = componentLocation(file);

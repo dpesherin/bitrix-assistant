@@ -269,6 +269,36 @@ insertGlobal(
 	'Ищет запись по ID.',
 );
 
+const statusFile = path.join(site, 'local/php_interface/status.php');
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line) VALUES (?,?,?,?,?,?,?)',
+	'Vendor\\Demo\\Status',
+	'Status',
+	'Vendor\\Demo',
+	'enum',
+	'demo',
+	statusFile,
+	3,
+);
+insertGlobal(
+	'INSERT INTO constants (class_fqcn, name, type, value, file, line) VALUES (?,?,?,?,?,?)',
+	'Vendor\\Demo\\Status',
+	'Active',
+	'case',
+	"'active'",
+	statusFile,
+	5,
+);
+insertGlobal(
+	'INSERT INTO constants (class_fqcn, name, type, value, file, line) VALUES (?,?,?,?,?,?)',
+	'Vendor\\Demo\\Status',
+	'Blocked',
+	'case',
+	"'blocked'",
+	statusFile,
+	6,
+);
+
 const articlePath = path.join(site, 'local/php_interface/article.php');
 insertGlobal(
 	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line) VALUES (?,?,?,?,?,?,?)',
@@ -1961,6 +1991,109 @@ check(
 	'PHP: foreach подсказывается готовой конструкцией с фигурными скобками',
 );
 
+// `return`/`break`/`continue` — тоже готовые инструкции, а не только имена.
+const returnText = '<?php\nfunction f(): int\n{\n    ret\n}\n';
+const returnUri = pathToFileURL(path.join(site, 'local/php_interface/return.php')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: returnUri, languageId: 'php', version: 1, text: returnText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === returnUri);
+const returnRequest = request('textDocument/completion', {
+	textDocument: { uri: returnUri },
+	position: positionAt(returnText, returnText.indexOf('ret') + 'ret'.length),
+});
+send(returnRequest);
+const returnCompletion = await waitFor((message) => message.id === returnRequest.id);
+const returnItem = (Array.isArray(returnCompletion.result) ? returnCompletion.result : []).find((item) => item.label === 'return');
+check(
+	Boolean(returnItem) && String(returnItem.textEdit?.newText ?? '').includes('return'),
+	'PHP: return подсказывается готовой инструкцией',
+);
+
+// Открывающий тег: `<?` даёт варианты `<?php`, `<?=`, `<?` с закрывающим `?>`.
+const tagText = '<div class="wrap">\n<';
+const tagUri = pathToFileURL(path.join(site, 'local/php_interface/tag.php')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: tagUri, languageId: 'php', version: 1, text: tagText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === tagUri);
+const tagRequest = request('textDocument/completion', {
+	textDocument: { uri: tagUri },
+	position: positionAt(tagText, tagText.length),
+});
+send(tagRequest);
+const tagCompletion = await waitFor((message) => message.id === tagRequest.id);
+const tagItems = Array.isArray(tagCompletion.result) ? tagCompletion.result : [];
+const phpTag = tagItems.find((item) => item.label === '<?php');
+check(
+	Boolean(phpTag) &&
+		tagItems.some((item) => item.label === '<?=') &&
+		tagItems.some((item) => item.label === '<?') &&
+		String(phpTag?.textEdit?.newText ?? '').endsWith('?>'),
+	'PHP: на `<` подсказываются `<?php`/`<?=`/`<?` с закрывающим `?>`',
+);
+
+const shortTagText = '<div>\n<php';
+const shortTagUri = pathToFileURL(path.join(site, 'local/php_interface/tag-short.php')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: shortTagUri, languageId: 'php', version: 1, text: shortTagText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === shortTagUri);
+const shortTagRequest = request('textDocument/completion', {
+	textDocument: { uri: shortTagUri },
+	position: positionAt(shortTagText, shortTagText.length),
+});
+send(shortTagRequest);
+const shortTagCompletion = await waitFor((message) => message.id === shortTagRequest.id);
+check(
+	(Array.isArray(shortTagCompletion.result) ? shortTagCompletion.result : []).some((item) => item.label === '<?php'),
+	'PHP: `<php` подсказывает `<?php`',
+);
+
+// Enum: `->value`/`->name` и значения после `::`.
+const enumText = '<?php\nuse Vendor\\Demo\\Status;\n\n$status = Status::Active;\n$status->\n';
+const enumUri = pathToFileURL(path.join(site, 'local/php_interface/enum.php')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: enumUri, languageId: 'php', version: 1, text: enumText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === enumUri);
+const enumRequest = request('textDocument/completion', {
+	textDocument: { uri: enumUri },
+	position: positionAt(enumText, enumText.length),
+});
+send(enumRequest);
+const enumCompletion = await waitFor((message) => message.id === enumRequest.id);
+const enumLabels = (Array.isArray(enumCompletion.result) ? enumCompletion.result : []).map((item) => item.label);
+check(
+	enumLabels.includes('value') && enumLabels.includes('name'),
+	`PHP: enum — после $status-> подсказываются value/name (${enumLabels.join(', ')})`,
+);
+
+const enumStaticText = '<?php\nuse Vendor\\Demo\\Status;\n\nStatus::\n';
+const enumStaticUri = pathToFileURL(path.join(site, 'local/php_interface/enum-static.php')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: enumStaticUri, languageId: 'php', version: 1, text: enumStaticText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === enumStaticUri);
+const enumStaticRequest = request('textDocument/completion', {
+	textDocument: { uri: enumStaticUri },
+	position: positionAt(enumStaticText, enumStaticText.length),
+});
+send(enumStaticRequest);
+const enumStaticCompletion = await waitFor((message) => message.id === enumStaticRequest.id);
+const enumCase = (Array.isArray(enumStaticCompletion.result) ? enumStaticCompletion.result : []).find((item) => item.label === 'Active');
+check(Boolean(enumCase) && enumCase.kind === 20, 'PHP: enum — после `Status::` подсказывается значение Active');
+
 // В HTML-разметке шаблона PHP-подсказок быть не должно: там атрибуты и текст.
 const markupText = '<?php $x = 1; ?>\n<div class="Te"></div>\n';
 const markupUri = pathToFileURL(path.join(site, 'local/php_interface/markup.php')).toString();
@@ -1979,6 +2112,30 @@ const markupCompletion = await waitFor((message) => message.id === markupRequest
 check(
 	(Array.isArray(markupCompletion.result) ? markupCompletion.result : []).length === 0,
 	'PHP: в HTML-разметке шаблона нет PHP-подсказок',
+);
+
+// Hover в разметке не должен показывать описания конструкций PHP (`class`, `for`).
+const markupHoverRequest = request('textDocument/hover', {
+	textDocument: { uri: markupUri },
+	position: positionAt(markupText, markupText.indexOf('class="Te') + 2),
+});
+send(markupHoverRequest);
+const markupHover = await waitFor((message) => message.id === markupHoverRequest.id);
+check(
+	markupHover.result === null || markupHover.result === undefined,
+	'PHP: в HTML-разметке hover по `class` не показывает подсказку PHP',
+);
+
+// Переход из разметки тоже не должен искать PHP-объявления.
+const markupDefinitionRequest = request('textDocument/definition', {
+	textDocument: { uri: markupUri },
+	position: positionAt(markupText, markupText.indexOf('class="Te') + 2),
+});
+send(markupDefinitionRequest);
+const markupDefinition = await waitFor((message) => message.id === markupDefinitionRequest.id);
+check(
+	Array.isArray(markupDefinition.result) && markupDefinition.result.length === 0,
+	'PHP: в HTML-разметке definition по `class` не уходит в PHP-индекс',
 );
 
 // JS: встроенные объекты, их подписи параметров и методы на литералах.

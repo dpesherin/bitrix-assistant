@@ -4,7 +4,7 @@ import { generateOrmAnnotation, parseOrmFields } from '../src/features/ormAnnota
 import { platformKey, resolveLspLaunch, staticBinaryName } from '../src/lsp/platform';
 import { updateKeybindings } from '../src/features/hotkeysConfig';
 import { parseLintOutput } from '../src/features/phpLint';
-import { isInsidePhpTag } from '../src/features/phpContext';
+import { isInsidePhpTag, startsWithPhpTag } from '../src/features/phpContext';
 import { selectRuntimeAsset } from '../src/php/runtimeAssets';
 import {
 	BUNDLED_PHP_VERSION,
@@ -26,6 +26,16 @@ test('PHP-шаблон: разметка отличается от кода в <
 	assert.equal(isInsidePhpTag(tpl, tpl.length), false);
 	// Файл без разметки целиком в PHP.
 	assert.equal(isInsidePhpTag('<?php echo 1;', 13), true);
+});
+
+test('PHP-шаблон: недописанный открывающий тег считается PHP', () => {
+	for (const text of ['<?', '<?=', '<?php', '<ph', '<php', "  <?php\n"]) {
+		assert.equal(startsWithPhpTag(text), true, text);
+	}
+	// HTML, XML и обычный текст не должны переключать документ в PHP.
+	for (const text of ['<div>', '<p>', '<?xml version="1.0"?>', '<phtml>', 'text <?php']) {
+		assert.equal(startsWithPhpTag(text), false, text);
+	}
 });
 
 test('PHP runtime: выбор prebuilt-сборки под платформу', () => {

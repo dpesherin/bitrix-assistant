@@ -290,7 +290,12 @@ final class Server
 				// `_` в триггерах: после него редактор запрашивает список заново
 				// (иначе фильтрует уже показанные элементы и `str_con_` прячет
 				// `str_contains` до следующей буквы).
-				'completionProvider' => ['triggerCharacters' => ['.', '\\', ':', '>', '$', '_'], 'resolveProvider' => false],
+				// `<`, `?`, `=` — открывающий тег PHP набирается по частям
+				// (`<?`, `<?=`, `<php`), и список должен обновляться на каждом шаге.
+				'completionProvider' => [
+					'triggerCharacters' => ['.', '\\', ':', '>', '$', '_', '<', '?', '='],
+					'resolveProvider' => false,
+				],
 				'hoverProvider' => true,
 				'definitionProvider' => true,
 				'typeDefinitionProvider' => true,
@@ -477,9 +482,9 @@ final class Server
 			return $this->jsCompletion->provide($document, $offset);
 		}
 		if ($document->languageId === 'php' && !$inPhp) {
-			// HTML-разметка шаблона: здесь нужны имена атрибутов и текст, а не
+			// HTML-разметка шаблона: здесь нужны открывающие теги PHP, а не
 			// функции, константы и конструкции PHP.
-			return [];
+			return $this->phpCompletion->tagItems($document, $offset);
 		}
 		return $this->phpCompletion->provide($document, $offset);
 	}
@@ -499,8 +504,13 @@ final class Server
 			return $this->jsHover->provide($document, $offset);
 		}
 		if ($document->languageId === 'php') {
-			if (!$this->isPhpContext($document->text, $offset) && $this->isJsContext($document->text, $offset)) {
-				return $this->jsHover->provide($document, $offset);
+			if (!$this->isPhpContext($document->text, $offset)) {
+				// Инлайн-JS в шаблоне — JS-подсказки; HTML-разметка — не PHP.
+				// Иначе наведение на `for`, `class` и другие имена атрибутов
+				// показывало описания одноимённых конструкций PHP.
+				return $this->isJsContext($document->text, $offset)
+					? $this->jsHover->provide($document, $offset)
+					: null;
 			}
 			// Сначала PHP: JS-анализатор ищет по имени члена и на PHP-коде
 			// находит чужие методы (`time` из bitrix/js/...).
@@ -524,8 +534,13 @@ final class Server
 			return $this->jsDefinition->provide($document, $offset);
 		}
 		if ($document->languageId === 'php') {
-			if (!$this->isPhpContext($document->text, $offset) && $this->isJsContext($document->text, $offset)) {
-				return $this->jsDefinition->provide($document, $offset);
+			if (!$this->isPhpContext($document->text, $offset)) {
+				// Инлайн-JS — JS-переход; HTML-разметка — не PHP. Иначе переход
+				// по `class`, `for` и другим атрибутам искал одноимённые сущности
+				// в PHP-индексе.
+				return $this->isJsContext($document->text, $offset)
+					? $this->jsDefinition->provide($document, $offset)
+					: [];
 			}
 			return $this->phpDefinition->provide($document, $offset);
 		}

@@ -515,6 +515,37 @@ final class PhpTypeInference
 			}
 			return array_values(array_unique($result));
 		}
+		// `$status = OrderStatus::Active;` — значение enum имеет тип самого enum.
+		if (preg_match(
+			'/^(?:(self|static|parent)|(\\\\?[A-Za-z_][A-Za-z0-9_\\\\]*))::([A-Za-z_][A-Za-z0-9_]*)$/',
+			$current,
+			$enumMatch,
+		) === 1) {
+			$receivers = [];
+			if (($enumMatch[1] ?? '') !== '') {
+				$class = $context->classAt($offset);
+				if ($class !== null) {
+					if (strtolower($enumMatch[1]) === 'parent') {
+						$row = $this->repository->classByName($class['fqcn']);
+						$parent = $row !== null ? $this->repository->parentClassName($row) : null;
+						if ($parent !== null) {
+							$receivers[] = $parent;
+						}
+					} else {
+						$receivers[] = $class['fqcn'];
+					}
+				}
+			} else {
+				$receivers = $context->classCandidates($enumMatch[2]);
+			}
+			foreach (array_values(array_unique($receivers)) as $receiver) {
+				$constant = $this->repository->findConstantInHierarchy((string) $receiver, $enumMatch[3]);
+				if ($constant !== null && (string) ($constant['type'] ?? '') === 'case') {
+					return [ltrim((string) $receiver, '\\')];
+				}
+			}
+			return [];
+		}
 		for ($guard = 0; $guard < self::MAX_DEPTH; $guard++) {
 			$next = null;
 			// Продолжение цепочки: `->method()` к уже известному результату.

@@ -41,6 +41,11 @@ final class PhpSnippetProvider
 		'catch' => "catch (\\\\Throwable \$\${1:e}) {\n\t\$0\n}",
 		'finally' => "finally {\n\t\$0\n}",
 		'function' => "function \${1:name}(\${2}) {\n\t\$0\n}",
+		// Управляющие инструкции: `break`/`continue` — готовые с `;`, `return`
+		// оставляет курсор перед `;`, чтобы сразу набрать выражение.
+		'return' => 'return $0;',
+		'break' => 'break;',
+		'continue' => 'continue;',
 	];
 
 	/**
