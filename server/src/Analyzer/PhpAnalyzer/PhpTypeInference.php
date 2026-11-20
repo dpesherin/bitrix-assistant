@@ -548,6 +548,29 @@ final class PhpTypeInference
 		}
 		for ($guard = 0; $guard < self::MAX_DEPTH; $guard++) {
 			$next = null;
+			// `(new IntegerField('ID'))->configurePrimary()`: скобки закрываются
+			// раньше конца выражения, поэтому stripOuterParens их не снимает
+			// (он убирает только скобки вокруг всего выражения). Разбираем
+			// группу отдельно, хвост цепочки — обычным шагом ниже.
+			if ($candidates === [] && $current !== '' && $current[0] === '(') {
+				$close = $this->matchingParen($current, 0);
+				if ($close > 0 && $close < strlen($current) - 1) {
+					$candidates = $this->expressionCandidates(
+						$context,
+						substr($current, 1, $close - 1),
+						$offset,
+						$depth + 1,
+					);
+					if ($candidates === []) {
+						return [];
+					}
+					$current = ltrim(substr($current, $close + 1));
+					if ($current === '') {
+						return $candidates;
+					}
+					continue;
+				}
+			}
 			// Продолжение цепочки: `->method()` к уже известному результату.
 			// Раньше шаг цепочки обрабатывался только сразу после вызова, поэтому
 			// третья и последующие ссылки (`a()->b()->c()->d()`) терялись.
@@ -591,7 +614,9 @@ final class PhpTypeInference
 				} else {
 					$receivers = $context->classCandidates($match[2]);
 				}
-				$candidates = $this->methodCallReturnCandidates($receivers, $match[3], $context);
+				// `Class::method()`, `self::`, `parent::` — не вызов через объект:
+				// позднее статическое связывание здесь не применяем.
+				$candidates = $this->methodCallReturnCandidates($receivers, $match[3], $context, false);
 				$next = $this->afterCall($current, strlen($match[0]) - 1);
 			} elseif (preg_match('/^\$([A-Za-z_][A-Za-z0-9_]*)\s*->\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/', $current, $match) === 1) {
 				$receivers = $this->variableCandidates($context, '$' . $match[1], $offset, $depth + 1);
@@ -662,8 +687,16 @@ final class PhpTypeInference
 		return null;
 	}
 
-	private function methodCallReturnCandidates(array $receivers, string $methodName, PhpDocumentContext $context): array
-	{
+	/**
+	 * @param bool $instance вызов через `->`: `$this`/`static` дают тип получателя
+	 *                      (позднее статическое связывание), а не объявившего класса.
+	 */
+	private function methodCallReturnCandidates(
+		array $receivers,
+		string $methodName,
+		PhpDocumentContext $context,
+		bool $instance = true,
+	): array {
 		foreach (array_values(array_unique($receivers)) as $receiver) {
 			if ($this->repository->classByName($receiver) === null) {
 				continue;
@@ -672,7 +705,7 @@ final class PhpTypeInference
 			if ($method === null) {
 				continue;
 			}
-			$candidates = $this->returnTypeCandidates($receiver, $method, $context);
+			$candidates = $this->returnTypeCandidates($receiver, $method, $context, $instance);
 			if ($candidates !== []) {
 				return $candidates;
 			}
@@ -684,8 +717,13 @@ final class PhpTypeInference
 	 * @param array<string, mixed> $method
 	 * @return array<int, string>
 	 */
-	private function returnTypeCandidates(string $declaringClass, array $method, PhpDocumentContext $context): array
-	{
+	private function returnTypeCandidates(
+		string $declaringClass,
+		array $method,
+		PhpDocumentContext $context,
+		bool $instance = true,
+	): array {
+		$receiver = $declaringClass;
 		// Важно: тип объявлен в классе, где метод ОБЪЯВЛЕН (его namespace и use),
 		// а не в классе получателя — иначе алиасы вроде `use Result as QueryResult`
 		// не находятся у наследника.
@@ -693,14 +731,23 @@ final class PhpTypeInference
 		if ($owner !== '') {
 			$declaringClass = $owner;
 		}
-		return $this->typeCandidatesFor((string) ($method['return_type'] ?? ''), $declaringClass, $context);
+		return $this->typeCandidatesFor(
+			(string) ($method['return_type'] ?? ''),
+			$declaringClass,
+			$context,
+			$instance ? $receiver : null,
+		);
 	}
 
 	/**
 	 * @return array<int, string>
 	 */
-	private function typeCandidatesFor(string $type, string $declaringClass, PhpDocumentContext $context): array
-	{
+	private function typeCandidatesFor(
+		string $type,
+		string $declaringClass,
+		PhpDocumentContext $context,
+		?string $lateStaticClass = null,
+	): array {
 		$type = trim($type);
 		if ($type === '') {
 			return [];
@@ -713,13 +760,15 @@ final class PhpTypeInference
 				continue;
 			}
 			$lower = strtolower($part);
-			// `@return $this` — fluent-метод ORM-цепочки (`setSelect()`, `where()`)
-			// возвращает тот же объект, поэтому тип остаётся прежним.
-			if ($lower === '$this') {
-				$result[] = $declaringClass;
+			// `@return $this`/`@return static` — fluent-метод ORM-цепочки
+			// (`setSelect()`, `where()`, `configureTitle()`) возвращает тот же
+			// объект: тип остаётся типом получателя (позднее статическое
+			// связывание), а не объявившего класса.
+			if ($lower === '$this' || $lower === 'static') {
+				$result[] = $lateStaticClass ?? $declaringClass;
 				continue;
 			}
-			if ($lower === 'self' || $lower === 'static') {
+			if ($lower === 'self') {
 				$result[] = $declaringClass;
 				continue;
 			}

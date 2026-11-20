@@ -722,6 +722,50 @@ for (const [name, signature, returnType, isStatic, line] of [
 		null,
 	);
 }
+// Наследник OrmQuery: `@return $this` у унаследованного метода должен сохранять
+// дочерний тип (позднее статическое связывание), иначе следующее звено цепочки
+// после `(new OrmChildQuery())->setSelect(...)` остаётся без подсказок.
+const ormChildPath = path.join(site, 'local/php_interface/orm_child_query.php');
+writeFileSync(
+	ormChildPath,
+	[
+		'<?php',
+		'namespace Vendor\\Demo;',
+		'',
+		'class OrmChildQuery extends OrmQuery',
+		'{',
+		'    /** @return $this */',
+		'    public function onlyChild() {}',
+		'}',
+		'',
+	].join('\n'),
+);
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line, extends, implements, traits_json) VALUES (?,?,?,?,?,?,?,?,?,?)',
+	'Vendor\\Demo\\OrmChildQuery',
+	'OrmChildQuery',
+	'Vendor\\Demo',
+	'class',
+	'demo',
+	ormChildPath,
+	4,
+	'Vendor\\Demo\\OrmQuery',
+	JSON.stringify([]),
+	JSON.stringify([]),
+);
+insertGlobal(
+	'INSERT INTO methods (class_fqcn, name, signature, return_type, params_json, is_static, visibility, file, line, doc) VALUES (?,?,?,?,?,?,?,?,?,?)',
+	'Vendor\\Demo\\OrmChildQuery',
+	'onlyChild',
+	'onlyChild()',
+	'$this',
+	'[]',
+	0,
+	'public',
+	ormChildPath,
+	7,
+	null,
+);
 const ormUsagePath = path.join(site, 'local/php_interface/orm_usage.php');
 
 const membersPath = path.join(site, 'local/php_interface/members.php');
@@ -2059,6 +2103,35 @@ const fluentLabels = (Array.isArray(fluentCompletion.result) ? fluentCompletion.
 check(
 	fluentLabels.includes('setSelect') && fluentLabels.includes('where') && fluentLabels.includes('fetchAll'),
 	'PHP: completion в многострочной fluent-цепочке query()->setSelect()->where()->',
+);
+
+// Второе звено цепочки после скобочной группы: `(new Foo())->setSelect()->`.
+// Раньше такая цепочка обрывалась (0 подсказок) из-за скобок вокруг `new`.
+const parenText = [
+	'<?php',
+	'use Vendor\\Demo\\OrmChildQuery;',
+	'',
+	'$query = (new OrmChildQuery())',
+	"    ->setSelect(['ID'])",
+	'    ->',
+].join('\n');
+const parenUri = pathToFileURL(path.join(site, 'local/php_interface/orm_paren.php')).toString();
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: parenUri, languageId: 'php', version: 1, text: parenText } },
+});
+await waitFor((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === parenUri);
+const parenCompletionRequest = request('textDocument/completion', {
+	textDocument: { uri: parenUri },
+	position: positionAt(parenText, parenText.length),
+});
+send(parenCompletionRequest);
+const parenCompletion = await waitFor((message) => message.id === parenCompletionRequest.id);
+const parenLabels = (Array.isArray(parenCompletion.result) ? parenCompletion.result : []).map((item) => item.label);
+check(
+	parenLabels.includes('onlyChild') && parenLabels.includes('fetchAll') && parenLabels.includes('setSelect'),
+	'PHP: completion во 2-м звене цепочки (new Foo())->setSelect()-> (@return $this + скобки)',
 );
 
 // Конструкции PHP вставляются готовым сниппетом: `foreach (...) { ... }`.
