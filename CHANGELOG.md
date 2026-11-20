@@ -3,6 +3,22 @@
 Что меняется для вас — по-человечески: что было не так и что теперь.
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версии — [SemVer](https://semver.org/lang/ru/).
 
+## [0.6.1]
+
+### Исправлено
+
+- Подсказки больше не обрываются на втором и следующих звеньях цепочки методов:
+  `(new IntegerField('ID'))->configureAutocomplete()->configurePrimary()`,
+  `(new Foo())->bar()->baz()`. Раньше работало только первое `->`, а дальше список
+  был пуст: скобки вокруг `new` мешали выводу типа.
+- `@return $this` и `@return static` сохраняют тип получателя, а не класса, где метод
+  объявлен. Поэтому цепочка не рвётся на методе родителя перед методом наследника —
+  `(new IntegerField('X'))->configureTitle(...)->configureRequired()` подсказывает
+  дальше, хотя `configureTitle()` объявлен в `Field`, а `configureRequired()` — в
+  `ScalarField`.
+- В `npm run test:e2e` закреплена регрессия на цепочку `(new Foo())->setSelect()->`
+  с `@return $this`.
+
 ## [0.6.0]
 
 ### Подсказки
