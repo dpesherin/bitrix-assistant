@@ -1030,8 +1030,10 @@ final class Server
 	 * публикует результаты для каждого.
 	 *
 	 * `scope=index` — проиндексированные PHP-файлы (сначала файлы проекта),
-	 * действует лимит из настроек. `scope=local` — все PHP и JS-файлы папки
-	 * `local` на диске, включая не попавшие в индекс, без лимита.
+	 * действует лимит из настроек. `scope=local` — PHP и JS-файлы папки
+	 * `local` на диске, включая не попавшие в индекс, без лимита;
+	 * `localFolders` сужает проверку папками первого уровня, пустой список —
+	 * весь `local`.
 	 *
 	 * @param array<string, mixed> $params
 	 * @return array{files: int, diagnostics: int, truncated: bool}
@@ -1041,7 +1043,10 @@ final class Server
 		$limit = (int) ($params['limit'] ?? 500);
 		$limit = max(1, min(2000, $limit));
 		$scope = ($params['scope'] ?? 'index') === 'local' ? 'local' : 'index';
-		$files = $scope === 'local' ? $this->localFiles() : $this->repository->indexedPhpFiles($limit, true);
+		$folders = is_array($params['localFolders'] ?? null) ? $params['localFolders'] : [];
+		$files = $scope === 'local'
+			? $this->localFiles($folders)
+			: $this->repository->indexedPhpFiles($limit, true);
 		$scanned = 0;
 		$found = 0;
 		foreach ($files as $file) {
@@ -1076,7 +1081,7 @@ final class Server
 		return [
 			'files' => $scanned,
 			'diagnostics' => $found,
-			// В режиме local лимита нет: обходим всю папку целиком.
+			// В режиме local лимита нет: обходим всю выбранную часть целиком.
 			'truncated' => $scope === 'index' && count($files) >= $limit,
 		];
 	}
@@ -1084,11 +1089,13 @@ final class Server
 	/**
 	 * Файлы папки `local` для проверки: PHP и JS, обход по диску.
 	 * Индексатор часть файлов намеренно пропускает (шаблоны и скрипты вне
-	 * известных корней), а режим «весь local» проверяет всё содержимое папки.
+	 * известных корней), а режим «весь local» проверяет содержимое папки.
+	 * Выбранные папки первого уровня сужают обход; пустой список — весь local.
 	 *
+	 * @param array<int, mixed> $folders
 	 * @return array<int, string>
 	 */
-	private function localFiles(): array
+	private function localFiles(array $folders): array
 	{
 		$root = $this->config->bitrixRoot;
 		if ($root === null || $root === '') {
@@ -1099,10 +1106,67 @@ final class Server
 		if (!is_dir($local)) {
 			return [];
 		}
+		$selected = [];
+		foreach ($folders as $folder) {
+			if (!is_string($folder)) {
+				continue;
+			}
+			$relative = $this->normalizeLocalFolder($folder);
+			if ($relative !== null) {
+				$selected[$relative] = true;
+			}
+		}
+		if ($selected === []) {
+			// Пустой список — «весь local». Непустой, но без валидных папок —
+			// не повод проверять всё: игнорируем такой выбор целиком.
+			return $folders === [] ? $this->walkDirectory($local) : [];
+		}
+		$files = [];
+		foreach (array_keys($selected) as $relative) {
+			$path = $local . '/' . $relative;
+			if (!is_dir($path)) {
+				continue;
+			}
+			foreach ($this->walkDirectory($path) as $file) {
+				$files[$file] = true;
+			}
+		}
+		$result = array_keys($files);
+		sort($result, SORT_STRING);
+		return $result;
+	}
+
+	/**
+	 * Проверяемая папка внутри local: относительный путь без `..` и без
+	 * абсолютных корней. Всё остальное — не наша папка, такой выбор игнорируем.
+	 */
+	private function normalizeLocalFolder(string $folder): ?string
+	{
+		$folder = trim(str_replace('\\', '/', $folder));
+		$folder = trim($folder, '/');
+		if ($folder === '' || preg_match('#^[A-Za-z]:#', $folder) === 1) {
+			return null;
+		}
+		foreach (explode('/', $folder) as $segment) {
+			if ($segment === '' || $segment === '.' || $segment === '..') {
+				return null;
+			}
+		}
+		return $folder;
+	}
+
+	/**
+	 * Рекурсивный обход папки. Нечитаемый каталог (права, битая ссылка) не
+	 * должен отменять проверку остального: отдаём собранное и пишем в лог.
+	 *
+	 * @return array<int, string>
+	 */
+	private function walkDirectory(string $directory): array
+	{
 		$files = [];
 		try {
 			$iterator = new \RecursiveIteratorIterator(
-				new \RecursiveDirectoryIterator($local, \FilesystemIterator::SKIP_DOTS),
+				new \RecursiveDirectoryIterator($directory, \FilesystemIterator::SKIP_DOTS),
 				\RecursiveIteratorIterator::LEAVES_ONLY,
 			);
 			foreach ($iterator as $file) {
@@ -1111,8 +1175,6 @@ final class Server
 				}
 			}
 		} catch (\Throwable $error) {
-			// Нечитаемый каталог (права, битая ссылка) не должен отменять проверку
-			// всего остального: отдаём то, что успели собрать, и пишем причину в лог.
 			$this->logger->info('local: обход прерван — ' . $error->getMessage());
 		}
 		sort($files, SORT_STRING);

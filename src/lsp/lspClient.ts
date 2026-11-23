@@ -22,6 +22,16 @@ import { resolveLspLaunch } from './platform';
  */
 const EXPECTED_EXIT = /^\[Error\s+-[^\]]*\]\s+Server process exited with code 0\.$/;
 
+/**
+ * `Pending response rejected since connection got disposed` — штатный текст
+ * vscode-jsonrpc, когда LSP остановился или перезапустился во время запроса.
+ * Пользователю его показывать нельзя: это не ошибка его действий.
+ */
+function isConnectionDisposed(error: unknown): boolean {
+	const text = errorMessage(error).toLowerCase();
+	return text.includes('connection got disposed') || text.includes('connection was disposed');
+}
+
 function quietOutput(inner: vscode.OutputChannel): vscode.OutputChannel {
 	const keep = (value: string): boolean => !EXPECTED_EXIT.test(value.trim());
 	return new Proxy(inner, {
@@ -204,22 +214,45 @@ export class BitrixLanguageClient implements vscode.Disposable {
 	 * Диагностика по всему проекту: сервер обходит файлы выбранного режима
 	 * и публикует результаты, поэтому они появляются в Problems.
 	 *
-	 * `index` — файлы из индекса (лимит), `local` — все PHP и JS-файлы папки
-	 * `local` на диске, включая не проиндексированные.
+	 * `index` — файлы из индекса (лимит), `local` — PHP и JS-файлы папки
+	 * `local` на диске, включая не проиндексированные. `localFolders` сужает
+	 * проверку папками первого уровня внутри `local`; пустой список — весь local.
+	 *
+	 * LSP может перезапуститься в это время (после индексации, смены версии PHP):
+	 * тогда запрос повторяется один раз на новом соединении.
 	 */
 	async diagnoseAll(
 		limit: number,
 		scope: DiagnosticsScope = 'index',
+		localFolders: readonly string[] = [],
 	): Promise<{ files: number; diagnostics: number; truncated: boolean }> {
-		// Сканирование запускается сразу после индексации, а LSP стартует
-		// параллельно — ждём его до 10 секунд.
+		const params = { limit, scope, localFolders: [...localFolders] };
+		for (let attempt = 0; ; attempt++) {
+			const client = await this.runningClient();
+			try {
+				return await client.sendRequest<{ files: number; diagnostics: number; truncated: boolean }>(
+					'workspace/diagnoseAll',
+					params,
+				);
+			} catch (err) {
+				if (!isConnectionDisposed(err)) {
+					throw err;
+				}
+				if (attempt > 0) {
+					throw new Error('LSP-сервер перезапустился во время проверки — повторите команду.');
+				}
+				log().info('Проверка проекта: LSP перезапустился, повторяем запрос');
+			}
+		}
+	}
+
+	/** Клиент в состоянии Running: проверка стартует параллельно с запуском LSP. */
+	private async runningClient(): Promise<LanguageClient> {
+		// Ждём до 10 секунд: сканирование запускается сразу после индексации.
 		for (let attempt = 0; attempt < 20; attempt++) {
 			const client = this.client;
 			if (client && client.state === State.Running) {
-				return await client.sendRequest<{ files: number; diagnostics: number; truncated: boolean }>(
-					'workspace/diagnoseAll',
-					{ limit, scope },
-				);
+				return client;
 			}
 			await new Promise((resolve) => setTimeout(resolve, 500));
 		}

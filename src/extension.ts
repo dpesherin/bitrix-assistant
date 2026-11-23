@@ -9,13 +9,15 @@ import { BUNDLED_PHP_VERSION, SELECTABLE_PHP_VERSIONS } from './php/interpreter'
 import { ProjectPhpStore } from './php/projectPhp';
 import { flashFailed, flashIdentical, flashUploaded, spinUpload } from './features/uploadFeedback';
 import { applyHotkeys } from './features/hotkeys';
-import { BitrixIndexer, activeFolder, isIndexableSource, resolveLayout } from './indexer/indexer';
+import { BitrixIndexer, activeFolder, isIndexableSource, resolveLayout, type BitrixLayout } from './indexer/indexer';
 import { errorMessage, initLog, log, showLog } from './log';
 import { BitrixLanguageClient } from './lsp/lspClient';
 import {
 	DIAGNOSTICS_SCOPE_CHOICES,
 	DiagnosticsScopeStore,
+	diagnosticsFoldersLabel,
 	diagnosticsScopeLabel,
+	type DiagnosticsScope,
 } from './lsp/diagnosticsScope';
 import { readSettings } from './settings';
 import { BaseSnapshots } from './ssh/baseSnapshot';
@@ -203,6 +205,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<Active
 			void vscode.window.showInformationMessage('Bitrix LSP перезапущен');
 		}),
 		vscode.commands.registerCommand('bitrix.php.diagnoseAll', () => diagnoseAll(ext)),
+		vscode.commands.registerCommand('bitrix.php.selectDiagnosticsFolders', () =>
+			configureLocalFolders(ext),
+		),
 	);
 
 	registerWatchers(context, ext);
@@ -1338,6 +1343,7 @@ async function showMenu(ext: ActiveExtension): Promise<void> {
 	items.push(
 		{ label: '$(database) Статистика индекса', command: 'bitrix.index.stats' },
 		{ label: '$(refresh) Перестроить индекс', command: 'bitrix.index.rebuild' },
+		{ label: '$(folder) Папки проверки в local', command: 'bitrix.php.selectDiagnosticsFolders' },
 		{ label: '$(output) Показать лог', command: 'bitrix.showLog' },
 	);
 	const picked = await vscode.window.showQuickPick(items, {
@@ -1349,10 +1355,58 @@ async function showMenu(ext: ActiveExtension): Promise<void> {
 	}
 }
 
+/** Подпись цели проверки для сообщений: для local — ещё и выбранные папки. */
+function diagnosticsTargetLabel(scope: DiagnosticsScope, folders: readonly string[]): string {
+	return scope === 'local' ? `local: ${diagnosticsFoldersLabel(folders)}` : diagnosticsScopeLabel(scope);
+}
+
+/** Папки первого уровня внутри local — то, что можно выбрать для проверки. */
+function localTopFolders(layout: BitrixLayout): string[] {
+	try {
+		return fs
+			.readdirSync(layout.localDir, { withFileTypes: true })
+			.filter((entry) => entry.isDirectory())
+			.map((entry) => entry.name)
+			.sort((left, right) => left.localeCompare(right, 'ru'));
+	} catch (err) {
+		log().debug(`Папки local: ${errorMessage(err)}`);
+		return [];
+	}
+}
+
+/**
+ * Мультивыбор папок внутри local. Пустой результат означает «весь local» —
+ * так же трактуется и пустая сохранённая запись, об этом сказано в подсказке.
+ */
+async function pickLocalFolders(
+	ext: ActiveExtension,
+	layout: BitrixLayout,
+	folder: vscode.WorkspaceFolder | undefined,
+): Promise<string[] | undefined> {
+	const available = localTopFolders(layout);
+	if (available.length === 0) {
+		// В local нет папок — выбирать не из чего, проверять тоже.
+		return [];
+	}
+	const saved = ext.diagnosticsScope.localFolders(folder);
+	const picked = await vscode.window.showQuickPick(
+		available.map((name) => ({ label: name, picked: saved.includes(name) })),
+		{
+			title: 'Bitrix Assistant: папки внутри local',
+			placeHolder: 'Отметьте папки. Ничего не отмечено — проверить весь local',
+			canPickMany: true,
+		},
+	);
+	if (!picked) {
+		return undefined;
+	}
+	return picked.map((item) => item.label);
+}
+
 /**
  * Проверка всего проекта после индексации (настройка bitrix.diagnostics.projectScan).
  * Ошибки не показываем: если LSP не поднялся, диагностика придёт по открытым файлам.
- * Режим берём сохранённый за проектом, без диалога — он уже выбран человеком.
+ * Режим и папки берём сохранённые за проектом, без диалога — их уже выбрал человек.
  */
 async function runProjectScan(ext: ActiveExtension): Promise<void> {
 	const config = vscode.workspace.getConfiguration('bitrix');
@@ -1360,11 +1414,13 @@ async function runProjectScan(ext: ActiveExtension): Promise<void> {
 		return;
 	}
 	const limit = config.get<number>('diagnostics.projectLimit', 500);
-	const scope = ext.diagnosticsScope.scope(activeFolder());
+	const folder = activeFolder();
+	const scope = ext.diagnosticsScope.scope(folder);
+	const folders = scope === 'local' ? ext.diagnosticsScope.localFolders(folder) : [];
 	try {
-		const result = await ext.lsp.diagnoseAll(limit, scope);
+		const result = await ext.lsp.diagnoseAll(limit, scope, folders);
 		log().info(
-			`Проверка проекта (${diagnosticsScopeLabel(scope)}): файлов ${result.files}, диагностик ${result.diagnostics}`,
+			`Проверка проекта (${diagnosticsTargetLabel(scope, folders)}): файлов ${result.files}, диагностик ${result.diagnostics}`,
 		);
 	} catch (err) {
 		log().debug(`Проверка проекта пропущена: ${errorMessage(err)}`);
@@ -1372,16 +1428,21 @@ async function runProjectScan(ext: ActiveExtension): Promise<void> {
 }
 
 /**
- * «Проверить весь проект»: сначала выбор режима, затем проверка.
- * Выбор запоминается за папкой проекта — в следующий раз он уже стоит по умолчанию.
+ * «Проверить весь проект»: выбор режима, для local — ещё и папок внутри него,
+ * затем сама проверка. Выбор запоминается за папкой проекта и в следующий раз
+ * стоит по умолчанию.
  */
 async function diagnoseAll(ext: ActiveExtension): Promise<void> {
 	const folder = activeFolder();
 	const current = ext.diagnosticsScope.scope(folder);
+	const savedFolders = ext.diagnosticsScope.localFolders(folder);
 	const picked = await vscode.window.showQuickPick(
 		DIAGNOSTICS_SCOPE_CHOICES.map((choice) => ({
 			label: choice.label,
-			detail: choice.detail,
+			detail:
+				choice.scope === 'local'
+					? `${choice.detail} Папки: ${diagnosticsFoldersLabel(savedFolders)}.`
+					: choice.detail,
 			description: choice.scope === current ? 'выбрано сейчас' : undefined,
 			scope: choice.scope,
 		})),
@@ -1391,6 +1452,22 @@ async function diagnoseAll(ext: ActiveExtension): Promise<void> {
 		return;
 	}
 	const scope = picked.scope;
+	let folders: string[] = [];
+	if (scope === 'local') {
+		const layout = resolveLayout(folder);
+		if (!layout) {
+			void vscode.window.showWarningMessage(
+				'Bitrix Assistant: папка bitrix не найдена — режим «весь local» недоступен.',
+			);
+			return;
+		}
+		const chosen = await pickLocalFolders(ext, layout, folder);
+		if (chosen === undefined) {
+			return;
+		}
+		folders = chosen;
+		await ext.diagnosticsScope.setLocalFolders(folder, folders);
+	}
 	await ext.diagnosticsScope.setScope(folder, scope);
 	const limit = vscode.workspace
 		.getConfiguration('bitrix')
@@ -1399,19 +1476,46 @@ async function diagnoseAll(ext: ActiveExtension): Promise<void> {
 		const result = await vscode.window.withProgress(
 			{
 				location: vscode.ProgressLocation.Notification,
-				title: `Bitrix Assistant: проверка проекта (${diagnosticsScopeLabel(scope)})`,
+				title: `Bitrix Assistant: проверка проекта (${diagnosticsTargetLabel(scope, folders)})`,
 			},
-			() => ext.lsp.diagnoseAll(limit, scope),
+			() => ext.lsp.diagnoseAll(limit, scope, folders),
 		);
 		const suffix = result.truncated
 			? ` Проверены первые ${result.files} файлов, лимит можно увеличить в настройках.`
 			: '';
 		void vscode.window.showInformationMessage(
-			`Проверено файлов: ${result.files} (${diagnosticsScopeLabel(scope)}), диагностик: ${result.diagnostics}.${suffix}`,
+			`Проверено файлов: ${result.files} (${diagnosticsTargetLabel(scope, folders)}), диагностик: ${result.diagnostics}.${suffix}`,
 		);
 	} catch (err) {
 		void vscode.window.showErrorMessage(`Bitrix Assistant: ${errorMessage(err)}`);
 	}
+}
+
+/**
+ * Отдельная команда: поменять папки внутри local в любой момент, не запуская
+ * проверку. Применится в режиме «весь local», в том числе к автопроверке.
+ */
+async function configureLocalFolders(ext: ActiveExtension): Promise<void> {
+	const layout = resolveLayout();
+	if (!layout) {
+		void vscode.window.showWarningMessage(
+			'Bitrix Assistant: папка bitrix не найдена — выбирать папки внутри local не из чего.',
+		);
+		return;
+	}
+	const folder = activeFolder();
+	const chosen = await pickLocalFolders(ext, layout, folder);
+	if (chosen === undefined) {
+		return;
+	}
+	await ext.diagnosticsScope.setLocalFolders(folder, chosen);
+	const hint =
+		ext.diagnosticsScope.scope(folder) === 'local'
+			? ''
+			: ' Сейчас выбран режим «индекс проекта»; папки применятся в режиме «весь local».';
+	void vscode.window.showInformationMessage(
+		`Bitrix Assistant: папки для режима «весь local» — ${diagnosticsFoldersLabel(chosen)}.${hint}`,
+	);
 }
 
 async function runIndexCommand(ext: ActiveExtension, full: boolean): Promise<void> {

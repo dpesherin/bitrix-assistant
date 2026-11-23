@@ -3447,6 +3447,41 @@ check(
 	'Проверка проекта: диагностика файла вне индекса',
 );
 
+// Выбор папок внутри local: обходится только отмеченная папка.
+const scopedRequest = request('workspace/diagnoseAll', {
+	limit: 500,
+	scope: 'local',
+	localFolders: ['templates'],
+});
+send(scopedRequest);
+const scopedResponse = await waitFor((message) => message.id === scopedRequest.id);
+check(
+	scopedResponse.result?.files === 1,
+	`Проверка проекта: выбранная папка ограничивает обход (${scopedResponse.result?.files})`,
+);
+const scopedPublished = messages
+	.slice(0, messages.indexOf(scopedResponse))
+	.some((message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === templateUri);
+check(scopedPublished, 'Проверка проекта: файл из выбранной папки проверен');
+
+// Несуществующая папка и путь за пределы local ничего не проверяют.
+const ghostRequest = request('workspace/diagnoseAll', {
+	limit: 500,
+	scope: 'local',
+	localFolders: ['ghost'],
+});
+send(ghostRequest);
+const ghostResponse = await waitFor((message) => message.id === ghostRequest.id);
+check(ghostResponse.result?.files === 0, 'Проверка проекта: несуществующая папка — 0 файлов');
+const escapeRequest = request('workspace/diagnoseAll', {
+	limit: 500,
+	scope: 'local',
+	localFolders: ['../bitrix'],
+});
+send(escapeRequest);
+const escapeResponse = await waitFor((message) => message.id === escapeRequest.id);
+check(escapeResponse.result?.files === 0, 'Проверка проекта: путь за пределы local игнорируется');
+
 send(request('shutdown', {}));
 
 

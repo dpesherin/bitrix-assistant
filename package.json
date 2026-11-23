@@ -220,6 +220,11 @@
 				"command": "bitrix.php.diagnoseAll",
 				"title": "Bitrix Assistant: проверить весь проект",
 				"category": "Bitrix Assistant"
+			},
+			{
+				"command": "bitrix.php.selectDiagnosticsFolders",
+				"title": "Bitrix Assistant: выбрать папки внутри local для проверки",
+				"category": "Bitrix Assistant"
 			}
 		],
 		"configuration": {
@@ -421,7 +426,7 @@
 				"bitrix.diagnostics.projectScan": {
 					"type": "boolean",
 					"default": true,
-					"description": "После индексации проверять весь проект в сохранённом для проекта режиме («индекс проекта» или «весь local») и показывать диагностику в Problems для всех файлов, а не только для открытых. Режим выбирается командой «Проверить весь проект» и запоминается."
+					"description": "После индексации проверять весь проект в сохранённом для проекта режиме («индекс проекта» или «весь local») и показывать диагностику в Problems для всех файлов, а не только для открытых. Режим и папки внутри local выбираются командой «Проверить весь проект» и запоминаются."
 				}
 			}
 		},
