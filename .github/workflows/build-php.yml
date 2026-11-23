@@ -43,6 +43,17 @@ jobs:
             binary: php-win32-x64.exe
             arch: x86_64
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    env:
+      # Токен для api.github.com: без него spc упирается в анонимный лимит
+      # (60 запросов в час на общий IP раннера). Если Actions-токена не хватает
+      # (например, для чужих публичных репозиториев), положите PAT в секрет
+      # SPC_GITHUB_TOKEN — он имеет приоритет.
+      GITHUB_TOKEN: ${{ secrets.SPC_GITHUB_TOKEN || github.token }}
+      # Повторы HTTP-запросов внутри spc: на Windows встречается обрыв
+      # api.github.com, и без повтора артефакт остаётся нескачанным.
+      SPC_DOWNLOAD_RETRIES: '3'
     steps:
       - uses: actions/checkout@v4
 
@@ -70,8 +81,6 @@ jobs:
       # и завершается кодом 69. Поэтому токен и повторы — как у сборки ниже.
       - name: Check build environment
         shell: bash
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
           for attempt in 1 2 3; do
@@ -104,16 +113,19 @@ jobs:
       # (exit 75), а также php.net, который на `releases/index.php?json` иногда
       # отдаёт HTML вместо JSON — spc отвечает «Invalid PHP release info
       # received for version 8.4». Повторяем сборку несколько раз: spc кэширует
-      # уже скачанное, так что повтор не начинает с нуля.
+      # уже скачанное, так что повтор не начинает с нуля. Последняя попытка идёт
+      # с --debug, чтобы в логе был HTTP-код и адрес, если опять не скачалось.
       - name: Build PHP (craft.yml)
         shell: bash
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
           for attempt in 1 2 3 4 5; do
-            echo "==> Попытка сборки $attempt"
-            if ./spc craft; then
+            extra=""
+            if [[ "$attempt" -eq 5 ]]; then
+              extra="--debug"
+            fi
+            echo "==> Попытка сборки $attempt ${extra}"
+            if ./spc craft $extra; then
               echo "Сборка удалась"
               exit 0
             fi
@@ -126,7 +138,8 @@ jobs:
           exit 1
 
       # Если сборка всё же упала — в лог попадает то, что видит раннер: код
-      # ответа php.net и хвост вывода spc. Без этого причину не видно.
+      # ответа php.net, лимит GitHub API с нашим токеном и хвост вывода spc.
+      # Без этого причину не видно.
       - name: Diagnostics on failure
         if: failure()
         shell: bash
@@ -135,6 +148,14 @@ jobs:
           echo "== php.net releases/index.php?json&version=8.4"
           curl -sS -m 30 -o /dev/null -w "http_code=%{http_code} content_type=%{content_type} size=%{size_download}\n" \
             "https://www.php.net/releases/index.php?json&version=8.4" || true
+          echo "== GitHub API с токеном Actions"
+          curl -sS -m 30 -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -o /tmp/rate.json -w "http_code=%{http_code}\n" \
+            "https://api.github.com/rate_limit" || true
+          head -c 500 /tmp/rate.json 2>/dev/null || true
+          echo
+          echo "== ошибки скачивания из spc.output.log"
+          grep -Ei "download|github|403|404|429|rate limit|curl" log/spc.output.log 2>/dev/null | tail -n 30 || true
           echo "== хвост spc.output.log"
           tail -n 40 log/spc.output.log 2>/dev/null || true
 
