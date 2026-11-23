@@ -9,9 +9,14 @@ import { BUNDLED_PHP_VERSION, SELECTABLE_PHP_VERSIONS } from './php/interpreter'
 import { ProjectPhpStore } from './php/projectPhp';
 import { flashFailed, flashIdentical, flashUploaded, spinUpload } from './features/uploadFeedback';
 import { applyHotkeys } from './features/hotkeys';
-import { BitrixIndexer, isIndexableSource, resolveLayout } from './indexer/indexer';
+import { BitrixIndexer, activeFolder, isIndexableSource, resolveLayout } from './indexer/indexer';
 import { errorMessage, initLog, log, showLog } from './log';
 import { BitrixLanguageClient } from './lsp/lspClient';
+import {
+	DIAGNOSTICS_SCOPE_CHOICES,
+	DiagnosticsScopeStore,
+	diagnosticsScopeLabel,
+} from './lsp/diagnosticsScope';
 import { readSettings } from './settings';
 import { BaseSnapshots } from './ssh/baseSnapshot';
 import { ByteProgress, SshConnectionManager } from './ssh/connection';
@@ -47,6 +52,7 @@ interface ActiveExtension {
 	statusBar: BitrixStatusBar;
 	phpSyntax: PhpSyntaxChecker;
 	phpProjects: ProjectPhpStore;
+	diagnosticsScope: DiagnosticsScopeStore;
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<ActiveExtension> {
@@ -63,6 +69,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Active
 	const sync = new SyncService(connections, bases);
 	const indexer = new BitrixIndexer(context);
 	const phpProjects = new ProjectPhpStore(context);
+	const diagnosticsScope = new DiagnosticsScopeStore(context.workspaceState);
 	const lsp = new BitrixLanguageClient(context, indexer, phpProjects);
 	const tree = new RemoteTreeProvider(connections);
 	const indexView = new IndexViewProvider(indexer);
@@ -92,6 +99,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Active
 		statusBar,
 		phpSyntax,
 		phpProjects,
+		diagnosticsScope,
 	};
 
 	context.subscriptions.push(
@@ -194,28 +202,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Active
 			await ext.lsp.restart();
 			void vscode.window.showInformationMessage('Bitrix LSP перезапущен');
 		}),
-		vscode.commands.registerCommand('bitrix.php.diagnoseAll', async () => {
-			const limit = vscode.workspace
-				.getConfiguration('bitrix')
-				.get<number>('diagnostics.projectLimit', 500);
-			try {
-				const result = await vscode.window.withProgress(
-					{
-						location: vscode.ProgressLocation.Notification,
-						title: 'Bitrix Assistant: проверка проекта',
-					},
-					() => ext.lsp.diagnoseAll(limit),
-				);
-				const suffix = result.truncated
-					? ` Проверены первые ${result.files} файлов, лимит можно увеличить в настройках.`
-					: '';
-				void vscode.window.showInformationMessage(
-					`Проверено файлов: ${result.files}, диагностик: ${result.diagnostics}.${suffix}`,
-				);
-			} catch (err) {
-				void vscode.window.showErrorMessage(`Bitrix Assistant: ${errorMessage(err)}`);
-			}
-		}),
+		vscode.commands.registerCommand('bitrix.php.diagnoseAll', () => diagnoseAll(ext)),
 	);
 
 	registerWatchers(context, ext);
@@ -1365,6 +1352,7 @@ async function showMenu(ext: ActiveExtension): Promise<void> {
 /**
  * Проверка всего проекта после индексации (настройка bitrix.diagnostics.projectScan).
  * Ошибки не показываем: если LSP не поднялся, диагностика придёт по открытым файлам.
+ * Режим берём сохранённый за проектом, без диалога — он уже выбран человеком.
  */
 async function runProjectScan(ext: ActiveExtension): Promise<void> {
 	const config = vscode.workspace.getConfiguration('bitrix');
@@ -1372,11 +1360,57 @@ async function runProjectScan(ext: ActiveExtension): Promise<void> {
 		return;
 	}
 	const limit = config.get<number>('diagnostics.projectLimit', 500);
+	const scope = ext.diagnosticsScope.scope(activeFolder());
 	try {
-		const result = await ext.lsp.diagnoseAll(limit);
-		log().info(`Проверка проекта: файлов ${result.files}, диагностик ${result.diagnostics}`);
+		const result = await ext.lsp.diagnoseAll(limit, scope);
+		log().info(
+			`Проверка проекта (${diagnosticsScopeLabel(scope)}): файлов ${result.files}, диагностик ${result.diagnostics}`,
+		);
 	} catch (err) {
 		log().debug(`Проверка проекта пропущена: ${errorMessage(err)}`);
+	}
+}
+
+/**
+ * «Проверить весь проект»: сначала выбор режима, затем проверка.
+ * Выбор запоминается за папкой проекта — в следующий раз он уже стоит по умолчанию.
+ */
+async function diagnoseAll(ext: ActiveExtension): Promise<void> {
+	const folder = activeFolder();
+	const current = ext.diagnosticsScope.scope(folder);
+	const picked = await vscode.window.showQuickPick(
+		DIAGNOSTICS_SCOPE_CHOICES.map((choice) => ({
+			label: choice.label,
+			detail: choice.detail,
+			description: choice.scope === current ? 'выбрано сейчас' : undefined,
+			scope: choice.scope,
+		})),
+		{ title: 'Bitrix Assistant: где искать проблемы', placeHolder: 'Режим сохранится за проектом' },
+	);
+	if (!picked) {
+		return;
+	}
+	const scope = picked.scope;
+	await ext.diagnosticsScope.setScope(folder, scope);
+	const limit = vscode.workspace
+		.getConfiguration('bitrix')
+		.get<number>('diagnostics.projectLimit', 500);
+	try {
+		const result = await vscode.window.withProgress(
+			{
+				location: vscode.ProgressLocation.Notification,
+				title: `Bitrix Assistant: проверка проекта (${diagnosticsScopeLabel(scope)})`,
+			},
+			() => ext.lsp.diagnoseAll(limit, scope),
+		);
+		const suffix = result.truncated
+			? ` Проверены первые ${result.files} файлов, лимит можно увеличить в настройках.`
+			: '';
+		void vscode.window.showInformationMessage(
+			`Проверено файлов: ${result.files} (${diagnosticsScopeLabel(scope)}), диагностик: ${result.diagnostics}.${suffix}`,
+		);
+	} catch (err) {
+		void vscode.window.showErrorMessage(`Bitrix Assistant: ${errorMessage(err)}`);
 	}
 }
 

@@ -13,6 +13,7 @@ import { log, errorMessage } from '../log';
 import { BitrixIndexer, resolveLayout } from '../indexer/indexer';
 import { readSettings } from '../settings';
 import type { ProjectPhpStore } from '../php/projectPhp';
+import type { DiagnosticsScope } from './diagnosticsScope';
 import { resolveLspLaunch } from './platform';
 
 /**
@@ -200,10 +201,16 @@ export class BitrixLanguageClient implements vscode.Disposable {
 
 	/** Попросить сервер перевалидировать открытые документы (после обновления индекса). */
 	/**
-	 * Диагностика по всему проекту: сервер обходит проиндексированные файлы
+	 * Диагностика по всему проекту: сервер обходит файлы выбранного режима
 	 * и публикует результаты, поэтому они появляются в Problems.
+	 *
+	 * `index` — файлы из индекса (лимит), `local` — все PHP и JS-файлы папки
+	 * `local` на диске, включая не проиндексированные.
 	 */
-	async diagnoseAll(limit: number): Promise<{ files: number; diagnostics: number; truncated: boolean }> {
+	async diagnoseAll(
+		limit: number,
+		scope: DiagnosticsScope = 'index',
+	): Promise<{ files: number; diagnostics: number; truncated: boolean }> {
 		// Сканирование запускается сразу после индексации, а LSP стартует
 		// параллельно — ждём его до 10 секунд.
 		for (let attempt = 0; attempt < 20; attempt++) {
@@ -211,7 +218,7 @@ export class BitrixLanguageClient implements vscode.Disposable {
 			if (client && client.state === State.Running) {
 				return await client.sendRequest<{ files: number; diagnostics: number; truncated: boolean }>(
 					'workspace/diagnoseAll',
-					{ limit },
+					{ limit, scope },
 				);
 			}
 			await new Promise((resolve) => setTimeout(resolve, 500));

@@ -1026,8 +1026,12 @@ final class Server
 	}
 
 	/**
-	 * Диагностика по всему проекту: обходит проиндексированные PHP-файлы
-	 * (сначала файлы проекта) и публикует результаты для каждого.
+	 * Диагностика по всему проекту: обходит файлы выбранного режима и
+	 * публикует результаты для каждого.
+	 *
+	 * `scope=index` — проиндексированные PHP-файлы (сначала файлы проекта),
+	 * действует лимит из настроек. `scope=local` — все PHP и JS-файлы папки
+	 * `local` на диске, включая не попавшие в индекс, без лимита.
 	 *
 	 * @param array<string, mixed> $params
 	 * @return array{files: int, diagnostics: int, truncated: bool}
@@ -1036,11 +1040,16 @@ final class Server
 	{
 		$limit = (int) ($params['limit'] ?? 500);
 		$limit = max(1, min(2000, $limit));
-		$files = $this->repository->indexedPhpFiles($limit, true);
+		$scope = ($params['scope'] ?? 'index') === 'local' ? 'local' : 'index';
+		$files = $scope === 'local' ? $this->localFiles() : $this->repository->indexedPhpFiles($limit, true);
 		$scanned = 0;
 		$found = 0;
 		foreach ($files as $file) {
 			if (str_starts_with($file, '<') || !is_file($file)) {
+				continue;
+			}
+			$language = $this->languageForFile($file);
+			if ($language === null) {
 				continue;
 			}
 			$size = @filesize($file);
@@ -1054,7 +1063,7 @@ final class Server
 				if (!is_string($text)) {
 					continue;
 				}
-				$document = new TextDocument($uri, 'php', $text);
+				$document = new TextDocument($uri, $language, $text);
 			}
 			$diagnostics = $this->collectDiagnostics($document);
 			$this->notify('textDocument/publishDiagnostics', [
@@ -1067,8 +1076,63 @@ final class Server
 		return [
 			'files' => $scanned,
 			'diagnostics' => $found,
-			'truncated' => count($files) >= $limit,
+			// В режиме local лимита нет: обходим всю папку целиком.
+			'truncated' => $scope === 'index' && count($files) >= $limit,
 		];
+	}
+
+	/**
+	 * Файлы папки `local` для проверки: PHP и JS, обход по диску.
+	 * Индексатор часть файлов намеренно пропускает (шаблоны и скрипты вне
+	 * известных корней), а режим «весь local» проверяет всё содержимое папки.
+	 *
+	 * @return array<int, string>
+	 */
+	private function localFiles(): array
+	{
+		$root = $this->config->bitrixRoot;
+		if ($root === null || $root === '') {
+			return [];
+		}
+		// Путь к `local` — рядом с `bitrix`, как в resolveLayout расширения.
+		$local = rtrim(Paths::normalize($root), '/') . '/local';
+		if (!is_dir($local)) {
+			return [];
+		}
+		$files = [];
+		try {
+			$iterator = new \RecursiveIteratorIterator(
+				new \RecursiveDirectoryIterator($local, \FilesystemIterator::SKIP_DOTS),
+				\RecursiveIteratorIterator::LEAVES_ONLY,
+			);
+			foreach ($iterator as $file) {
+				if ($file->isFile()) {
+					$files[] = $file->getPathname();
+				}
+			}
+		} catch (\Throwable $error) {
+			// Нечитаемый каталог (права, битая ссылка) не должен отменять проверку
+			// всего остального: отдаём то, что успели собрать, и пишем причину в лог.
+			$this->logger->info('local: обход прерван — ' . $error->getMessage());
+		}
+		sort($files, SORT_STRING);
+		return $files;
+	}
+
+	/**
+	 * Язык документа по расширению файла. Неизвестные расширения не проверяем:
+	 * PHP-анализатор на CSS/JSON дал бы ложные ошибки, а JS-анализатор — шум.
+	 */
+	private function languageForFile(string $file): ?string
+	{
+		$extension = strtolower(pathinfo($file, PATHINFO_EXTENSION));
+		if ($extension === 'php') {
+			return 'php';
+		}
+		if (in_array($extension, ['js', 'jsx', 'mjs', 'cjs', 'ts', 'mts', 'cts'], true)) {
+			return 'javascript';
+		}
+		return null;
 	}
 
 	/**

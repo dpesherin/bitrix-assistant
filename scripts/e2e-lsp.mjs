@@ -3424,6 +3424,29 @@ check(
 	'JS: члены после точки с переносом строки',
 );
 
+// Проверка всего проекта: режим «весь local» обходит папку на диске, а не
+// только индекс, поэтому попадает и файл шаблона, которого в индексе нет.
+const templateDir = path.join(site, 'local/templates/demo');
+mkdirSync(templateDir, { recursive: true });
+const templatePath = path.join(templateDir, 'template.php');
+writeFileSync(templatePath, '<?php\nnew ItemTable();\n');
+const templateUri = pathToFileURL(templatePath).toString();
+const diagnoseRequest = request('workspace/diagnoseAll', { limit: 1, scope: 'local' });
+send(diagnoseRequest);
+const diagnoseResponse = await waitFor((message) => message.id === diagnoseRequest.id);
+check(
+	(diagnoseResponse.result?.files ?? 0) > 1,
+	`Проверка проекта: режим local обходит все файлы (${diagnoseResponse.result?.files})`,
+);
+check(diagnoseResponse.result?.truncated === false, 'Проверка проекта: в режиме local лимит не применяется');
+const templateDiagnostics = await waitFor(
+	(message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === templateUri,
+);
+check(
+	templateDiagnostics.params.diagnostics.some((item) => item.code === 'bitrix.php.unresolved-class'),
+	'Проверка проекта: диагностика файла вне индекса',
+);
+
 send(request('shutdown', {}));
 
 
