@@ -10,6 +10,7 @@ import { Database } from './db';
 import { PARSER_VERSION } from './schema';
 import { IndexWriter } from './indexWriter';
 import { ParsePool, WORKER_MIN_FILES, resolveThreads, settlePool } from './parsePool';
+import { parseClassAliases } from './php/classAliases';
 import type { JsParseResult, ParseResult, ParsedFile, PhpParseResult } from './parseWorker';
 
 /**
@@ -679,6 +680,17 @@ export class BitrixIndexer implements vscode.Disposable {
 			},
 			token,
 		);
+
+		// 3b. Псевдоклассы-алиасы ядра: `Bitrix\Main\Entity\DataManager` и другие
+		// старые имена из compatibility.php. Без них проектные классы-наследники
+		// ORM не находят `getList`/`add`/`update`.
+		const compatibility = path.join(layout.bitrixDir, 'modules', 'main', 'include', 'compatibility.php');
+		const compatibilityText = fs.existsSync(compatibility)
+			? fs.readFileSync(compatibility, 'utf8')
+			: undefined;
+		if (compatibilityText !== undefined) {
+			writer.writeClassAliases(compatibility, parseClassAliases(compatibilityText));
+		}
 
 		// 4. Удалённые файлы.
 		if (!token?.isCancellationRequested) {

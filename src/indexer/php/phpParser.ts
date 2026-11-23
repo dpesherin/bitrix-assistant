@@ -643,7 +643,7 @@ function resolveImportedName(raw: string, uses: Map<string, string>): string {
 function findUseStatements(masked: string): Map<string, string> {
 	const map = new Map<string, string>();
 	// Групповой импорт: `use Prefix\{A, B as C};` — разворачиваем в отдельные строки.
-	const expanded = masked.replace(
+	const grouped = masked.replace(
 		/\buse\s+([A-Za-z0-9_\\]+)\s*\{([^}]*)\}\s*;/g,
 		(_all: string, prefix: string, body: string): string => {
 			const clean = prefix.replace(/\\+$/, '');
@@ -653,6 +653,22 @@ function findUseStatements(masked: string): Map<string, string> {
 				.filter((part) => part !== '' && !/^(?:function|const)\s/i.test(part))
 				.map((part) => `use ${clean}\\${part};`);
 			return ` ${parts.join(' ')} `;
+		},
+	);
+	// Перечисление через запятую: `use A, B\C as D;` — тоже отдельные импорты.
+	// Закрытие функции (`function () use ($x)`) сюда не попадает: в скобках есть
+	// `$`, а такие совпадения исключены.
+	const expanded = grouped.replace(
+		/\buse\s+([^;{}()$]+);/g,
+		(all: string, body: string): string => {
+			const parts = body
+				.split(',')
+				.map((part) => part.trim())
+				.filter((part) => part !== '');
+			if (parts.length < 2) {
+				return all;
+			}
+			return ` ${parts.map((part) => `use ${part};`).join(' ')} `;
 		},
 	);
 	const re = /\buse\s+([A-Za-z0-9_\\]+)(?:\s+as\s+([A-Za-z0-9_]+))?\s*;/g;
@@ -850,7 +866,10 @@ export function parsePhpFile(content: string): ParsedPhpFile {
 	const usesAt = (offset: number): Map<string, string> => {
 		const index = scopeIndexAt(offset);
 		if (index < 0) {
-			return new Map();
+			// Файл без namespace (легаси include/компоненты): `use` относится ко
+			// всему файлу, иначе `extends DiskComponent` терял импорт и родитель
+			// не находился — методы родителя выглядели неизвестными.
+			return uses;
 		}
 		const cached = scopeUses.get(index);
 		if (cached !== undefined) {

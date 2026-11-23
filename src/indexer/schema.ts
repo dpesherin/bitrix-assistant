@@ -12,7 +12,7 @@ export const SCHEMA_VERSION = 16;
  * групповые `use` или `@method`). При несовпадении сохранённой версии с этой
  * выполняется полная переиндексация.
  */
-export const PARSER_VERSION = 4;
+export const PARSER_VERSION = 5;
 
 /** Индекс — кеш: при несовпадении версии проще пересоздать таблицы. */
 export const DROP_SQL = `

@@ -909,23 +909,8 @@ final class Repository
 	private function directAncestors(array $class): array
 	{
 		$namespace = (string) ($class['namespace'] ?? '');
-		$raw = [];
-		$extends = $class['extends'] ?? null;
-		if (is_string($extends) && $extends !== '') {
-			$raw[] = $extends;
-		}
-		foreach (['implements', 'traits_json'] as $field) {
-			$decoded = json_decode((string) ($class[$field] ?? '[]'), true);
-			if (is_array($decoded)) {
-				foreach ($decoded as $item) {
-					if (is_string($item) && $item !== '') {
-						$raw[] = $item;
-					}
-				}
-			}
-		}
 		$result = [];
-		foreach ($raw as $name) {
+		foreach ($this->ancestorNames($class) as $name) {
 			foreach ($this->resolveClassCandidates($name, $namespace) as $candidate) {
 				if ($this->classByName($candidate) !== null) {
 					$result[] = $candidate;
@@ -934,6 +919,73 @@ final class Repository
 			}
 		}
 		return array_values(array_unique($result));
+	}
+
+	/**
+	 * Есть ли в цепочке предков класс, которого нет в индексе.
+	 *
+	 * Если да — «метод не найден» утверждать нельзя: предок мог его объявить
+	 * (например `League\Container\Container::__call` или встроенный `\XMLWriter`).
+	 * Диагностика в таком случае молчит.
+	 */
+	public function hasUnresolvedAncestors(string $fqcn): bool
+	{
+		$seen = [];
+		$queue = [ltrim($fqcn, '\\')];
+		while ($queue !== [] && count($seen) < 64) {
+			$current = (string) array_shift($queue);
+			$key = strtolower($current);
+			if (isset($seen[$key])) {
+				continue;
+			}
+			$seen[$key] = true;
+			$row = $this->classByName($current);
+			if ($row === null) {
+				return true;
+			}
+			$namespace = (string) ($row['namespace'] ?? '');
+			foreach ($this->ancestorNames($row) as $name) {
+				$resolved = null;
+				foreach ($this->resolveClassCandidates($name, $namespace) as $candidate) {
+					if ($this->classByName($candidate) !== null) {
+						$resolved = $candidate;
+						break;
+					}
+				}
+				if ($resolved === null) {
+					return true;
+				}
+				$queue[] = $resolved;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Имена предков как записаны в строке класса: extends + implements + traits.
+	 *
+	 * @param array<string, mixed> $class
+	 * @return array<int, string>
+	 */
+	private function ancestorNames(array $class): array
+	{
+		$raw = [];
+		$extends = $class['extends'] ?? null;
+		if (is_string($extends) && $extends !== '') {
+			$raw[] = $extends;
+		}
+		foreach (['implements', 'traits_json'] as $field) {
+			$decoded = json_decode((string) ($class[$field] ?? '[]'), true);
+			if (!is_array($decoded)) {
+				continue;
+			}
+			foreach ($decoded as $item) {
+				if (is_string($item) && $item !== '') {
+					$raw[] = $item;
+				}
+			}
+		}
+		return $raw;
 	}
 
 	/**

@@ -558,6 +558,36 @@ export class IndexWriter {
 		}
 		return map;
 	}
+
+	/**
+	 * Псевдоклассы-алиасы ядра (`Bitrix\Main\Entity\DataManager` → ORM-класс).
+	 *
+	 * Отдельных объявлений у них нет, но иерархия должна их видеть: пишем строку
+	 * класса с `extends = target`, тогда `extends Entity\DataManager` в проекте
+	 * находит методы `getList`/`add`/`update` через обычный обход предков.
+	 * Строки привязаны к `sourceFile` и переписываются целиком при каждом sync.
+	 */
+	writeClassAliases(sourceFile: string, aliases: readonly { alias: string; target: string }[]): void {
+		this.db.transaction(() => {
+			this.db.run('DELETE FROM classes WHERE file = ?', sourceFile);
+			for (const { alias, target } of aliases) {
+				const fqcn = alias.replace(/^\\/, '');
+				const targetName = target.replace(/^\\/, '');
+				const name = fqcn.split('\\').pop() ?? fqcn;
+				const namespace = fqcn.includes('\\') ? fqcn.slice(0, fqcn.lastIndexOf('\\')) : '';
+				this.db.run(
+					`INSERT OR REPLACE INTO classes
+						(fqcn, name, namespace, kind, module, file, line, extends, implements, traits_json, is_abstract, is_final, is_orm, deprecated, doc)
+					 VALUES (?, ?, ?, 'class', 'main', ?, 0, ?, '[]', '[]', 0, 0, 0, 0, NULL)`,
+					fqcn,
+					name,
+					namespace,
+					sourceFile,
+					targetName,
+				);
+			}
+		});
+	}
 }
 
 function listDirectories(dir: string): string[] {

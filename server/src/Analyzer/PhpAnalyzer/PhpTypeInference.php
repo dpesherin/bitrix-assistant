@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace BitrixLsp\Analyzer\PhpAnalyzer;
 
+use BitrixLsp\Analyzer\JsAnalyzer\JsScanner;
 use BitrixLsp\Index\Repository;
+use BitrixLsp\Support\PhpSource;
 
 /**
  * Вывод типа переменной по коду: `$x = new Foo()`, `$x = Class::method()`,
@@ -16,6 +18,12 @@ final class PhpTypeInference
 
 	/** @var array<string, array<string, string>> use-карты файлов объявлений (кэш) */
 	private array $fileUsesCache = [];
+
+	/** @var array<string, bool> владелец метода — трейт (кэш по FQCN) */
+	private array $traitCache = [];
+
+	/** @var array<string, string|null> тела методов для легаси-вывода (кэш) */
+	private array $methodBodyCache = [];
 
 	public function __construct(private readonly Repository $repository)
 	{
@@ -35,7 +43,7 @@ final class PhpTypeInference
 			return [];
 		}
 		$base = $this->baseCandidates($context, $variable, $offset, $depth);
-		$element = $this->elementCandidates($context, $variable, $offset);
+		$element = $this->elementCandidates($context, $variable, $offset, $depth);
 		if ($element !== []) {
 			$base = array_values(array_unique(array_merge($element, $base)));
 		}
@@ -70,7 +78,7 @@ final class PhpTypeInference
 	 *
 	 * @return array<int, string>
 	 */
-	private function elementCandidates(PhpDocumentContext $context, string $variable, int $offset): array
+	private function elementCandidates(PhpDocumentContext $context, string $variable, int $offset, int $depth): array
 	{
 		$source = null;
 		$bounds = $this->foreachSource($context->masked(), $variable, $offset);
@@ -87,7 +95,7 @@ final class PhpTypeInference
 		if ($source === null) {
 			return [];
 		}
-		$type = $this->elementTypeOf($context, $source, $offset);
+		$type = $this->elementTypeOf($context, $source, $offset, $depth);
 		if ($type === null) {
 			return [];
 		}
@@ -139,7 +147,7 @@ final class PhpTypeInference
 	}
 
 	/** Строка типа элемента массива для выражения-источника. */
-	private function elementTypeOf(PhpDocumentContext $context, string $source, int $offset): ?string
+	private function elementTypeOf(PhpDocumentContext $context, string $source, int $offset, int $depth): ?string
 	{
 		$source = trim($source);
 		$type = null;
@@ -180,7 +188,7 @@ final class PhpTypeInference
 				$type = $this->docReturnType($class['fqcn'], $match[1]);
 			}
 		} elseif (preg_match('/^\$([A-Za-z_][A-Za-z0-9_]*)\s*->\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)$/', $source, $match) === 1) {
-			foreach ($this->variableCandidates($context, '$' . $match[1], $offset) as $receiver) {
+			foreach ($this->variableCandidates($context, '$' . $match[1], $offset, $depth + 1) as $receiver) {
 				$type = $this->docReturnType($receiver, $match[2]);
 				if ($type !== null) {
 					break;
@@ -614,9 +622,7 @@ final class PhpTypeInference
 				} else {
 					$receivers = $context->classCandidates($match[2]);
 				}
-				// `Class::method()`, `self::`, `parent::` — не вызов через объект:
-				// позднее статическое связывание здесь не применяем.
-				$candidates = $this->methodCallReturnCandidates($receivers, $match[3], $context, false);
+				$candidates = $this->methodCallReturnCandidates($receivers, $match[3], $context);
 				$next = $this->afterCall($current, strlen($match[0]) - 1);
 			} elseif (preg_match('/^\$([A-Za-z_][A-Za-z0-9_]*)\s*->\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/', $current, $match) === 1) {
 				$receivers = $this->variableCandidates($context, '$' . $match[1], $offset, $depth + 1);
@@ -688,14 +694,15 @@ final class PhpTypeInference
 	}
 
 	/**
-	 * @param bool $instance вызов через `->`: `$this`/`static` дают тип получателя
-	 *                      (позднее статическое связывание), а не объявившего класса.
+	 * `$this`/`static` дают тип получателя (позднее статическое связывание),
+	 * а не класс, где объявлен метод. Это верно и для `->`, и для `::`:
+	 * `HeaderSections::getInstance()` с `@return static` возвращает HeaderSections,
+	 * а не трейт Singleton, где объявлен `getInstance()`.
 	 */
 	private function methodCallReturnCandidates(
 		array $receivers,
 		string $methodName,
 		PhpDocumentContext $context,
-		bool $instance = true,
 	): array {
 		foreach (array_values(array_unique($receivers)) as $receiver) {
 			if ($this->repository->classByName($receiver) === null) {
@@ -705,7 +712,7 @@ final class PhpTypeInference
 			if ($method === null) {
 				continue;
 			}
-			$candidates = $this->returnTypeCandidates($receiver, $method, $context, $instance);
+			$candidates = $this->returnTypeCandidates($receiver, $method, $context);
 			if ($candidates !== []) {
 				return $candidates;
 			}
@@ -721,7 +728,6 @@ final class PhpTypeInference
 		string $declaringClass,
 		array $method,
 		PhpDocumentContext $context,
-		bool $instance = true,
 	): array {
 		$receiver = $declaringClass;
 		// Важно: тип объявлен в классе, где метод ОБЪЯВЛЕН (его namespace и use),
@@ -731,12 +737,103 @@ final class PhpTypeInference
 		if ($owner !== '') {
 			$declaringClass = $owner;
 		}
-		return $this->typeCandidatesFor(
+		$candidates = $this->typeCandidatesFor(
 			(string) ($method['return_type'] ?? ''),
 			$declaringClass,
 			$context,
-			$instance ? $receiver : null,
+			$receiver,
 		);
+		if ($candidates !== []) {
+			return $candidates;
+		}
+		// Легаси-методы Битрикса часто без @return: `CGroup::GetList()` возвращает
+		// `$res = $DB->Query(...)`. Без этого после `->` не было `Fetch`, а вызов
+		// `->Fetch()` выглядел неизвестным методом.
+		return $this->legacyReturnCandidates($declaringClass, $method);
+	}
+
+	/**
+	 * Вывод типа для метода без объявленного возврата: `return $var;`, где
+	 * `$var = $DB->Query(...)`, и сам `CDatabase::Query()`.
+	 *
+	 * @param array<string, mixed> $method
+	 * @return array<int, string>
+	 */
+	private function legacyReturnCandidates(string $owner, array $method): array
+	{
+		$name = strtolower((string) ($method['name'] ?? ''));
+		if ($name === 'query' && $this->repository->classIsA($owner, 'CDatabase')) {
+			return ['CDBResult'];
+		}
+		$body = $this->methodBody($method);
+		if ($body === null) {
+			return [];
+		}
+		if (preg_match_all(
+			'/\$([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\$DB\s*->\s*Query\s*\(/i',
+			$body,
+			$matches,
+		) === false) {
+			return [];
+		}
+		$result = [];
+		foreach (array_unique($matches[1]) as $variable) {
+			if (preg_match('/\breturn\s+\$' . preg_quote($variable, '/') . '\s*;/i', $body) === 1) {
+				$result[] = 'CDBResult';
+				break;
+			}
+		}
+		return $result;
+	}
+
+	/**
+	 * Тело метода из файла объявления (строки замаскированы, чтобы скобки в
+	 * строках не сбивали поиск). Читаем один раз на метод.
+	 *
+	 * @param array<string, mixed> $method
+	 */
+	private function methodBody(array $method): ?string
+	{
+		$file = (string) ($method['file'] ?? '');
+		$line = (int) ($method['line'] ?? 0);
+		if ($file === '' || str_starts_with($file, '<') || $line <= 0) {
+			return null;
+		}
+		$key = $file . ':' . $line;
+		if (array_key_exists($key, $this->methodBodyCache)) {
+			return $this->methodBodyCache[$key];
+		}
+		$text = @file_get_contents($file);
+		if (!is_string($text)) {
+			return $this->methodBodyCache[$key] = null;
+		}
+		$masked = JsScanner::maskCode(PhpSource::phpOnly($text), true);
+		// Начало строки объявления.
+		$offset = 0;
+		for ($current = 1; $current < $line; $current++) {
+			$next = strpos($masked, "\n", $offset);
+			if ($next === false) {
+				return $this->methodBodyCache[$key] = null;
+			}
+			$offset = $next + 1;
+		}
+		$open = strpos($masked, '{', $offset);
+		if ($open === false) {
+			return $this->methodBodyCache[$key] = null;
+		}
+		$depth = 0;
+		$length = strlen($masked);
+		for ($i = $open; $i < $length; $i++) {
+			if ($masked[$i] === '{') {
+				$depth++;
+			} elseif ($masked[$i] === '}') {
+				$depth--;
+				if ($depth === 0) {
+					return $this->methodBodyCache[$key] = substr($masked, $open, $i - $open + 1);
+				}
+			}
+		}
+		return $this->methodBodyCache[$key] = null;
 	}
 
 	/**
@@ -769,11 +866,14 @@ final class PhpTypeInference
 				continue;
 			}
 			if ($lower === 'self') {
-				$result[] = $declaringClass;
+				// В трейте `self` — это класс, который трейт использует (PHP
+				// подставляет трейт в класс), поэтому берём получателя.
+				$result[] = $this->selfClass($declaringClass, $lateStaticClass);
 				continue;
 			}
 			if ($lower === 'parent') {
-				$row = $this->repository->classByName($declaringClass);
+				$owner = $this->selfClass($declaringClass, $lateStaticClass);
+				$row = $this->repository->classByName($owner);
 				$parent = $row !== null ? $this->repository->parentClassName($row) : null;
 				if ($parent !== null) {
 					$result[] = $parent;
@@ -833,6 +933,30 @@ final class PhpTypeInference
 		// Глобальные легаси-классы (`CFile`, `CDBResult`) ищем как есть.
 		// Поиск по короткому имени убран: он давал классы из чужих namespace.
 		return $this->repository->classByName($part) !== null ? $part : null;
+	}
+
+	/**
+	 * Класс, в котором реально исполняется метод: у трейта `self`/`static`/
+	 * `parent` указывают на класс-пользователь, у обычного класса — на него самого.
+	 */
+	private function selfClass(string $declaringClass, ?string $lateStaticClass): string
+	{
+		if ($lateStaticClass !== null && $lateStaticClass !== '' && $this->ownerIsTrait($declaringClass)) {
+			return $lateStaticClass;
+		}
+		return $declaringClass;
+	}
+
+	/** Объявлен ли класс трейтом (кэш: иначе по SQL на каждый вызов). */
+	private function ownerIsTrait(string $fqcn): bool
+	{
+		$key = strtolower(ltrim($fqcn, '\\'));
+		if (array_key_exists($key, $this->traitCache)) {
+			return $this->traitCache[$key];
+		}
+		$row = $this->repository->classByName($fqcn);
+		return $this->traitCache[$key] = $row !== null
+			&& strtolower((string) ($row['kind'] ?? '')) === 'trait';
 	}
 
 	/**

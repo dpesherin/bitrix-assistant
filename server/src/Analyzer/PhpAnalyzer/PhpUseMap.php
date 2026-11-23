@@ -36,6 +36,28 @@ final class PhpUseMap
 		if (is_string($expanded)) {
 			$masked = $expanded;
 		}
+		// Перечисление через запятую: `use A, B\C as D;` — тоже отдельные импорты.
+		// Скобки и `$` исключены: так не задевается `function () use ($x)`.
+		$comma = preg_replace_callback(
+			'/\buse\s+([^;{}()$]+);/',
+			static function (array $match): string {
+				$parts = array_filter(
+					array_map('trim', explode(',', $match[1])),
+					static fn (string $part): bool => $part !== '',
+				);
+				if (count($parts) < 2) {
+					return $match[0];
+				}
+				return ' ' . implode(' ', array_map(
+					static fn (string $part): string => 'use ' . $part . ';',
+					$parts,
+				)) . ' ';
+			},
+			$masked,
+		);
+		if (is_string($comma)) {
+			$masked = $comma;
+		}
 		$map = [];
 		if (preg_match_all('/\buse\s+([A-Za-z0-9_\\\\]+)(?:\s+as\s+([A-Za-z0-9_]+))?\s*;/', $masked, $matches, PREG_SET_ORDER) === false) {
 			return [];

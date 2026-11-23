@@ -4,6 +4,7 @@ import { isExcluded } from '../src/util/glob';
 import { parseJsConfig } from '../src/indexer/js/jsConfigParser';
 import { scanJsGlobals, scanJsTypeShapes } from '../src/indexer/js/jsScanner';
 import { parsePhpFile } from '../src/indexer/php/phpParser';
+import { parseClassAliases } from '../src/indexer/php/classAliases';
 import { buildUseEdit } from '../src/features/phpUseEdit';
 import { parseParametersPhp, componentLocation } from '../src/indexer/php/componentParser';
 import { parsePhpArrayLiteralForTest } from './helpers';
@@ -643,4 +644,45 @@ class Popup { show(): void {} }
 `);
 	assert.ok(memberOf.some((item) => item.name === 'BX.Main.Popup'));
 	assert.ok(memberOf.some((item) => item.name === 'BX.Main.Popup.show'));
+});
+
+test('PHP: extends в файле без namespace резолвится через use', () => {
+	// Легаси-компоненты лежат в глобальном namespace и импортируют родителя:
+	// без `use` для файлов без namespace родитель терялся и методы выглядели
+	// неизвестными.
+	const parsed = parsePhpFile(`<?php
+use Bitrix\\Disk\\Internals\\DiskComponent;
+
+class CDiskExternalLinkComponent extends DiskComponent
+{
+	public function executeComponent(): void {}
+}
+`);
+	assert.equal(parsed.classes[0]?.extends, 'Bitrix\\Disk\\Internals\\DiskComponent');
+});
+
+test('PHP: extends резолвится через перечисление use A, B;', () => {
+	const parsed = parsePhpFile(`<?php
+use Bitrix\\Main\\Context, Bitrix\\Main\\Type\\DateTime, Bitrix\\Main\\Loader;
+
+class Legacy extends DateTime
+{
+}
+`);
+	assert.equal(parsed.classes[0]?.extends, 'Bitrix\\Main\\Type\\DateTime');
+});
+
+test('Алиасы ядра: compatibility.php разбирается в пары alias → target', () => {
+	const source = `<?php
+Loader::registerClassAliases([
+	'Bitrix\\Main\\Entity\\DataManager' => 'Bitrix\\Main\\ORM\\Data\\DataManager',
+	'Bitrix\\Main\\Entity\\Query' => 'Bitrix\\Main\\ORM\\Query\\Query',
+]);
+`;
+	const aliases = parseClassAliases(source);
+	assert.deepEqual(aliases, [
+		{ alias: 'Bitrix\\Main\\Entity\\DataManager', target: 'Bitrix\\Main\\ORM\\Data\\DataManager' },
+		{ alias: 'Bitrix\\Main\\Entity\\Query', target: 'Bitrix\\Main\\ORM\\Query\\Query' },
+	]);
+	assert.deepEqual(parseClassAliases('<?php // без вызовов'), []);
 });

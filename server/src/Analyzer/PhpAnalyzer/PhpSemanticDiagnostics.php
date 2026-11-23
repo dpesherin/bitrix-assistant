@@ -88,8 +88,8 @@ final class PhpSemanticDiagnostics
 			'isset', 'empty', 'unset', 'array', 'list', 'echo', 'print', 'include', 'include_once',
 			'require', 'require_once', 'eval', 'match', 'return', 'exit', 'die', 'clone', 'yield',
 			'static', 'global', 'declare', 'namespace', 'use', 'class', 'interface', 'trait', 'fn',
-			// `break(2)` / `continue(2)` — это не вызовы функций.
-			'break', 'continue', 'match', 'throw',
+			// `break(2)` / `continue(2)` / `case (…)` — это не вызовы функций.
+			'break', 'continue', 'match', 'throw', 'case', 'default',
 		], true);
 
 		$callRe = '/(?<![>\\w$:])\\\\?([A-Za-z_][A-Za-z0-9_\\\\]*)\\s*\\(/';
@@ -102,6 +102,10 @@ final class PhpSemanticDiagnostics
 				}
 				$before = substr($masked, max(0, $whole[1] - 80), min(80, $whole[1]));
 				if (preg_match('/\b(?:new|function|fn)\s+&?\s*$/', $before) === 1) {
+					continue;
+				}
+				// `$db-> Fetch()` — метод с пробелом перед именем, а не функция.
+				if (preg_match('/(?:->|::)\s*$/', $before) === 1) {
 					continue;
 				}
 				$open = $whole[1] + strrpos($whole[0], '(');
@@ -326,9 +330,24 @@ final class PhpSemanticDiagnostics
 		if ($row !== null && stripos((string) ($row['doc'] ?? ''), '@method') !== false) {
 			return null;
 		}
+		// Трейт подмешивается в класс: `$this->foo()` может быть объявлен в
+		// классе-пользователе, которого в трейте не видно — не предупреждаем.
+		$declaring = PhpDocumentContext::create($document)->classAt($nameOffset);
+		if ($declaring !== null && strtolower((string) ($declaring['kind'] ?? '')) === 'trait') {
+			return null;
+		}
 		// Интерфейс описывает контракт: у реализации методы могут быть
 		// объявлены иначе (генерируемый ORM-код) — не предупреждаем.
 		if ($row !== null && strtolower((string) ($row['kind'] ?? '')) === 'interface') {
+			return null;
+		}
+		// У enum встроенные статические методы BackedEnum/UnitEnum.
+		if (
+			$row !== null
+			&& strtolower((string) ($row['kind'] ?? '')) === 'enum'
+			&& $target['operator'] === '::'
+			&& in_array(strtolower($name), ['from', 'tryfrom', 'cases'], true)
+		) {
 			return null;
 		}
 		// Динамическая диспетчеризация: тип зависит от строкового аргумента —
@@ -351,6 +370,12 @@ final class PhpSemanticDiagnostics
 			|| $this->repository->findMethodInHierarchy($class, '__call') !== null
 			|| $this->repository->findMethodInHierarchy($class, '__callStatic') !== null
 		) {
+			return null;
+		}
+		// Родитель не входит в индекс (`League\Container\Container`, `\XMLWriter`
+		// или класс из неиндексированного каталога): он мог объявить метод,
+		// поэтому «метод не найден» — не факт.
+		if ($this->repository->hasUnresolvedAncestors($class)) {
 			return null;
 		}
 		return $this->warning(

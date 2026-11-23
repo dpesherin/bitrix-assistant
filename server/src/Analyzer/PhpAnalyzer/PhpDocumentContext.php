@@ -348,6 +348,7 @@ final class PhpDocumentContext
 			$methods = $this->parseMethods($bodyOpen, $bodyClose);
 			$this->classes[] = [
 				'name' => $name,
+				'kind' => $match[1][0],
 				'fqcn' => $fqcn,
 				'namespace' => $this->namespace,
 				'extends' => $extends,

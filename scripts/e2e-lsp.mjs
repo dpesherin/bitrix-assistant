@@ -942,6 +942,147 @@ insertGlobal(
 	'Vendor\\Demo\\Orm\\OrmTable', 'OrmTable', 'Vendor\\Demo\\Orm', 'class', 'demo', ormTableFile, 5,
 	'Bitrix\\Main\\ORM\\Data\\DataManager',
 );
+
+// Псевдокласс-алиас ядра: отдельного объявления нет, есть только
+// registerClassAliases в compatibility.php. Индексатор пишет строку classes
+// с extends на актуальный класс — иначе наследники ORM не находят getList.
+const compatibilityFile = path.join(bitrix, 'modules/main/include/compatibility.php');
+mkdirSync(path.dirname(compatibilityFile), { recursive: true });
+writeFileSync(
+	compatibilityFile,
+	"<?php\nLoader::registerClassAliases([\n\t'Bitrix\\\\Main\\\\Entity\\\\DataManager' => 'Bitrix\\\\Main\\\\ORM\\\\Data\\\\DataManager',\n]);\n",
+);
+const aliasTableFile = path.join(site, 'local/modules/demo/lib/alias_table.php');
+writeFileSync(aliasTableFile, ['<?php', 'namespace Vendor\\Demo\\Orm;', '', 'class AliasTable extends \\Bitrix\\Main\\Entity\\DataManager', '{', '}', ''].join('\n'));
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line, extends) VALUES (?,?,?,?,?,?,?,?)',
+	'Bitrix\\Main\\Entity\\DataManager', 'DataManager', 'Bitrix\\Main\\Entity', 'class', 'main', compatibilityFile, 0,
+	'Bitrix\\Main\\ORM\\Data\\DataManager',
+);
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line, extends) VALUES (?,?,?,?,?,?,?,?)',
+	'Vendor\\Demo\\Orm\\AliasTable', 'AliasTable', 'Vendor\\Demo\\Orm', 'class', 'demo', aliasTableFile, 5,
+	'Bitrix\\Main\\Entity\\DataManager',
+);
+
+// Трейт с @return static: метод объявлен в трейте, а вызывается у класса.
+const factoryTraitFile = path.join(site, 'local/modules/demo/lib/traits_factory.php');
+writeFileSync(
+	factoryTraitFile,
+	['<?php', 'namespace Vendor\\Traits;', '', 'trait Factory', '{', '    /** @return static */', '    public static function create()', '    {', '        return new static();', '    }', '}', ''].join('\n'),
+);
+const factoryServiceFile = path.join(site, 'local/modules/demo/lib/service.php');
+writeFileSync(
+	factoryServiceFile,
+	['<?php', 'namespace Vendor;', '', 'use Vendor\\Traits\\Factory;', '', 'class Service', '{', '    use Factory;', '', '    public function run(): void', '    {', '    }', '}', ''].join('\n'),
+);
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line, traits_json) VALUES (?,?,?,?,?,?,?,?)',
+	'Vendor\\Traits\\Factory', 'Factory', 'Vendor\\Traits', 'trait', 'demo', factoryTraitFile, 5, '[]',
+);
+insertGlobal(
+	'INSERT INTO methods (class_fqcn, name, signature, return_type, params_json, is_static, visibility, file, line, doc) VALUES (?,?,?,?,?,?,?,?,?,?)',
+	'Vendor\\Traits\\Factory', 'create', 'create()', 'static', '[]', 1, 'public', factoryTraitFile, 8, '/** @return static */',
+);
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line, traits_json) VALUES (?,?,?,?,?,?,?,?)',
+	'Vendor\\Service', 'Service', 'Vendor', 'class', 'demo', factoryServiceFile, 5, JSON.stringify(['Vendor\\Traits\\Factory']),
+);
+insertGlobal(
+	'INSERT INTO methods (class_fqcn, name, signature, return_type, params_json, is_static, visibility, file, line, doc) VALUES (?,?,?,?,?,?,?,?,?,?)',
+	'Vendor\\Service', 'run', 'run(): void', 'void', '[]', 0, 'public', factoryServiceFile, 9, '',
+);
+
+// Встроенный \DateTime (стаб) и Bitrix-обёртка: получатель после приведения типа
+// не должен «переезжать» на внешний вызов в аргументах.
+const phpStubFile = '<phpstub>/DateTime.php';
+const bitrixDateTimeFile = path.join(bitrix, 'modules/main/lib/type/datetime.php');
+mkdirSync(path.dirname(bitrixDateTimeFile), { recursive: true });
+writeFileSync(bitrixDateTimeFile, ['<?php', 'namespace Bitrix\\Main\\Type;', '', 'class DateTime', '{', '    /** @return static */', '    public static function createFromPhp(\\DateTime $date)', '    {', '        return new static();', '    }', '}', ''].join('\n'));
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line) VALUES (?,?,?,?,?,?,?)',
+	'DateTime', 'DateTime', '', 'class', 'main', phpStubFile, 0,
+);
+insertGlobal(
+	'INSERT INTO methods (class_fqcn, name, signature, return_type, params_json, is_static, visibility, file, line, doc) VALUES (?,?,?,?,?,?,?,?,?,?)',
+	'DateTime', 'sub', 'sub(\\DateInterval $interval)', 'static', JSON.stringify([{ name: 'interval', type: '\\DateInterval', default: null, variadic: false, byRef: false }]), 0, 'public', phpStubFile, 0, '',
+);
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line) VALUES (?,?,?,?,?,?,?)',
+	'Bitrix\\Main\\Type\\DateTime', 'DateTime', 'Bitrix\\Main\\Type', 'class', 'main', bitrixDateTimeFile, 5,
+);
+insertGlobal(
+	'INSERT INTO methods (class_fqcn, name, signature, return_type, params_json, is_static, visibility, file, line, doc) VALUES (?,?,?,?,?,?,?,?,?,?)',
+	'Bitrix\\Main\\Type\\DateTime', 'createFromPhp', 'createFromPhp(\\DateTime $date)', 'static', JSON.stringify([{ name: 'date', type: '\\DateTime', default: null, variadic: false, byRef: false }]), 1, 'public', bitrixDateTimeFile, 7, '/** @return static */',
+);
+
+// Enum: у BackedEnum встроены from()/tryFrom()/cases() — они не объявлены в теле.
+const statusEnumFile = path.join(site, 'local/modules/demo/lib/status_enum.php');
+writeFileSync(
+	statusEnumFile,
+	['<?php', 'namespace Vendor\\Enums;', '', 'enum Status: string', '{', "    case Active = 'active';", '', '    public function label(): string', '    {', '        return $this->value;', '    }', '}', ''].join('\n'),
+);
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line) VALUES (?,?,?,?,?,?,?)',
+	'Vendor\\Enums\\Status', 'Status', 'Vendor\\Enums', 'enum', 'demo', statusEnumFile, 5,
+);
+insertGlobal(
+	'INSERT INTO methods (class_fqcn, name, signature, return_type, params_json, is_static, visibility, file, line, doc) VALUES (?,?,?,?,?,?,?,?,?,?)',
+	'Vendor\\Enums\\Status', 'label', 'label(): string', 'string', '[]', 0, 'public', statusEnumFile, 8, '',
+);
+
+// Класс с родителем, которого нет в индексе: проверить методы нельзя.
+const missingParentFile = path.join(site, 'local/modules/demo/lib/missing_parent.php');
+writeFileSync(
+	missingParentFile,
+	['<?php', 'namespace Vendor;', '', 'class MissingParent extends \\League\\Container\\Container', '{', '}', ''].join('\n'),
+);
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line, extends) VALUES (?,?,?,?,?,?,?,?)',
+	'Vendor\\MissingParent', 'MissingParent', 'Vendor', 'class', 'demo', missingParentFile, 5,
+	'League\\Container\\Container',
+);
+
+// Легаси: `CDatabase::Query()` и `$res = $DB->Query(...)` → CDBResult без @return.
+const cdbResultFile = path.join(site, 'local/modules/demo/lib/legacy_cdbresult.php');
+writeFileSync(
+	cdbResultFile,
+	['<?php', 'class CDBResult', '{', '    public function Fetch()', '    {', '        return false;', '    }', '}', ''].join('\n'),
+);
+const cdatabaseFile = path.join(site, 'local/modules/demo/lib/legacy_cdatabase.php');
+writeFileSync(
+	cdatabaseFile,
+	['<?php', 'class CDatabase', '{', '    public function Query($sql)', '    {', '        return new CDBResult();', '    }', '}', ''].join('\n'),
+);
+const legacyGroupsFile = path.join(site, 'local/modules/demo/lib/legacy_groups.php');
+writeFileSync(
+	legacyGroupsFile,
+	['<?php', 'class LegacyGroups', '{', '    public static function GetList()', '    {', '        $res = $DB->Query("select 1");', '', '        return $res;', '    }', '}', ''].join('\n'),
+);
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line) VALUES (?,?,?,?,?,?,?)',
+	'CDBResult', 'CDBResult', '', 'class', 'main', cdbResultFile, 2,
+);
+insertGlobal(
+	'INSERT INTO methods (class_fqcn, name, signature, return_type, params_json, is_static, visibility, file, line, doc) VALUES (?,?,?,?,?,?,?,?,?,?)',
+	'CDBResult', 'Fetch', 'Fetch()', '', '[]', 0, 'public', cdbResultFile, 4, '',
+);
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line) VALUES (?,?,?,?,?,?,?)',
+	'CDatabase', 'CDatabase', '', 'class', 'main', cdatabaseFile, 2,
+);
+insertGlobal(
+	'INSERT INTO methods (class_fqcn, name, signature, return_type, params_json, is_static, visibility, file, line, doc) VALUES (?,?,?,?,?,?,?,?,?,?)',
+	'CDatabase', 'Query', 'Query($sql)', '', '[]', 0, 'public', cdatabaseFile, 4, '',
+);
+insertGlobal(
+	'INSERT INTO classes (fqcn, name, namespace, kind, module, file, line) VALUES (?,?,?,?,?,?,?)',
+	'LegacyGroups', 'LegacyGroups', '', 'class', 'demo', legacyGroupsFile, 2,
+);
+insertGlobal(
+	'INSERT INTO methods (class_fqcn, name, signature, return_type, params_json, is_static, visibility, file, line, doc) VALUES (?,?,?,?,?,?,?,?,?,?)',
+	'LegacyGroups', 'GetList', 'GetList()', '', '[]', 1, 'public', legacyGroupsFile, 4, '',
+);
 // Стабы и vendor: класс из библиотеки и встроенная функция.
 const vendorFile = path.join(site, 'vendor/acme/lib/src/thing.php');
 mkdirSync(path.dirname(vendorFile), { recursive: true });
@@ -3292,6 +3433,223 @@ check(
 	legacyCodes.length === 0,
 	`PHP: регистр метода и union-тип возврата не дают ложных предупреждений (${legacyCodes.join('; ')})`,
 );
+
+// `@return static` у метода трейта: тип получателя — класс, у которого вызван
+// метод, а не трейт, где он объявлен.
+const staticLateUri = pathToFileURL(path.join(site, 'local/php_interface/static_late.php')).toString();
+const staticLateText = ['<?php', 'use Vendor\\Service;', '', 'Service::create()->run();', ''].join('\n');
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: staticLateUri, languageId: 'php', version: 1, text: staticLateText } },
+});
+const staticLateDiagnostics = await waitFor(
+	(message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === staticLateUri,
+);
+const staticLateUnknown = (staticLateDiagnostics?.params?.diagnostics ?? [])
+	.filter((item) => item.code === 'bitrix.php.unknown-method')
+	.map((item) => String(item.message));
+check(
+	staticLateUnknown.length === 0,
+	`PHP: @return static в трейте даёт класс получателя (${staticLateUnknown.join('; ')})`,
+);
+
+// Псевдокласс-алиас ядра: методы ORM находятся через extends на актуальный класс.
+const aliasUri = pathToFileURL(path.join(site, 'local/php_interface/alias_orm.php')).toString();
+const aliasText = [
+	'<?php',
+	'use Vendor\\Demo\\Orm\\AliasTable;',
+	'',
+	'AliasTable::getList([\'select\' => [\'ID\']])->fetch();',
+	'',
+].join('\n');
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: aliasUri, languageId: 'php', version: 1, text: aliasText } },
+});
+const aliasDiagnostics = await waitFor(
+	(message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === aliasUri,
+);
+const aliasUnknown = (aliasDiagnostics?.params?.diagnostics ?? [])
+	.filter((item) => item.code === 'bitrix.php.unknown-method')
+	.map((item) => String(item.message));
+check(
+	aliasUnknown.length === 0,
+	`PHP: алиас Bitrix\\Main\\Entity\\DataManager даёт методы ORM (${aliasUnknown.join('; ')})`,
+);
+
+// Приведение типа не должно подменять получателя внешним вызовом из аргументов:
+// `(new \DateTime())->sub(...)` — это \DateTime, а не Bitrix-обёртка DateTime.
+const castUri = pathToFileURL(path.join(site, 'local/php_interface/cast_receiver.php')).toString();
+const castText = [
+	'<?php',
+	'use Bitrix\\Main\\Type\\DateTime;',
+	'',
+	"$date = DateTime::createFromPhp((new \\DateTime())->sub(new \\DateInterval('P1Y')));",
+	'',
+].join('\n');
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: castUri, languageId: 'php', version: 1, text: castText } },
+});
+const castDiagnostics = await waitFor(
+	(message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === castUri,
+);
+const castUnknown = (castDiagnostics?.params?.diagnostics ?? [])
+	.filter((item) => item.code === 'bitrix.php.unknown-method')
+	.map((item) => String(item.message));
+check(
+	castUnknown.length === 0,
+	`PHP: получатель с приведением типа не берёт тип внешнего вызова (${castUnknown.join('; ')})`,
+);
+
+// Enum: встроенные from()/cases() не считаются неизвестными методами.
+const enumBuiltinUri = pathToFileURL(path.join(site, 'local/php_interface/enum_builtin.php')).toString();
+const enumBuiltinText = [
+	'<?php',
+	'use Vendor\\Enums\\Status;',
+	'',
+	"$status = Status::from('active');",
+	'$all = Status::cases();',
+	'',
+].join('\n');
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: enumBuiltinUri, languageId: 'php', version: 1, text: enumBuiltinText } },
+});
+const enumBuiltinDiagnostics = await waitFor(
+	(message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === enumBuiltinUri,
+);
+const enumBuiltinUnknown = (enumBuiltinDiagnostics?.params?.diagnostics ?? [])
+	.filter((item) => item.code === 'bitrix.php.unknown-method')
+	.map((item) => String(item.message));
+check(enumBuiltinUnknown.length === 0, `PHP: enum::from/cases встроены (${enumBuiltinUnknown.join('; ')})`);
+
+// Трейт: `$this->` может быть методом класса-пользователя, а не трейта.
+const traitSelfUri = pathToFileURL(path.join(site, 'local/php_interface/trait_self.php')).toString();
+const traitSelfText = [
+	'<?php',
+	'namespace Vendor\\Probe;',
+	'',
+	'trait ProbeTrait',
+	'{',
+	'    public function probe(): void',
+	'    {',
+	'        $this->missingInTrait();',
+	'    }',
+	'}',
+	'',
+].join('\n');
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: traitSelfUri, languageId: 'php', version: 1, text: traitSelfText } },
+});
+const traitSelfDiagnostics = await waitFor(
+	(message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === traitSelfUri,
+);
+const traitSelfUnknown = (traitSelfDiagnostics?.params?.diagnostics ?? [])
+	.filter((item) => item.code === 'bitrix.php.unknown-method')
+	.map((item) => String(item.message));
+check(traitSelfUnknown.length === 0, `PHP: $this в трейте не даёт unknown-method (${traitSelfUnknown.join('; ')})`);
+
+// Родитель не в индексе: «метод не найден» утверждать нельзя.
+const missingParentUri = pathToFileURL(path.join(site, 'local/php_interface/missing_parent_call.php')).toString();
+const missingParentText = [
+	'<?php',
+	'use Vendor\\MissingParent;',
+	'',
+	'$object = new MissingParent();',
+	'$object->magicFromParent();',
+	'',
+].join('\n');
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: missingParentUri, languageId: 'php', version: 1, text: missingParentText } },
+});
+const missingParentDiagnostics = await waitFor(
+	(message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === missingParentUri,
+);
+const missingParentUnknown = (missingParentDiagnostics?.params?.diagnostics ?? [])
+	.filter((item) => item.code === 'bitrix.php.unknown-method')
+	.map((item) => String(item.message));
+check(missingParentUnknown.length === 0, `PHP: неиндексированный родитель не даёт unknown-method (${missingParentUnknown.join('; ')})`);
+
+// Контроль: настоящая опечатка в методе по-прежнему видна.
+const typoUri = pathToFileURL(path.join(site, 'local/php_interface/typo_control.php')).toString();
+const typoText = ['<?php', 'use Vendor\\Service;', '', 'Service::create()->noSuchMethod();', ''].join('\n');
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: typoUri, languageId: 'php', version: 1, text: typoText } },
+});
+const typoDiagnostics = await waitFor(
+	(message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === typoUri,
+);
+const typoUnknown = (typoDiagnostics?.params?.diagnostics ?? [])
+	.filter((item) => item.code === 'bitrix.php.unknown-method');
+check(typoUnknown.length === 1, `PHP: настоящая опечатка метода ловится (${typoUnknown.length})`);
+
+// `case (…)` — не вызов функции; метод с пробелом перед именем (`$db -> Fetch()`)
+// тоже не функция.
+const keywordUri = pathToFileURL(path.join(site, 'local/php_interface/case_and_spaced_call.php')).toString();
+const keywordText = [
+	'<?php',
+	'class Probe',
+	'{',
+	'    public function fetch(): array',
+	'    {',
+	'        return [];',
+	'    }',
+	'}',
+	'',
+	'$probe = new Probe();',
+	'$row = $probe -> fetch();',
+	"switch (1) {",
+	"    case (strpos('a', 'b') !== false):",
+	'        break;',
+	'}',
+	'',
+].join('\n');
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: keywordUri, languageId: 'php', version: 1, text: keywordText } },
+});
+const keywordDiagnostics = await waitFor(
+	(message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === keywordUri,
+);
+const keywordUnknown = (keywordDiagnostics?.params?.diagnostics ?? [])
+	.filter((item) => item.code === 'bitrix.php.unknown-function')
+	.map((item) => String(item.message));
+check(keywordUnknown.length === 0, `PHP: case и метод с пробелом не функции (${keywordUnknown.join('; ')})`);
+
+// Легаси без @return: `$DB->Query()` и `return $res` дают CDBResult — есть Fetch.
+const legacyDbUri = pathToFileURL(path.join(site, 'local/php_interface/legacy_db.php')).toString();
+const legacyDbText = [
+	'<?php',
+	'$dbGroups = LegacyGroups::GetList();',
+	'$row = $dbGroups->Fetch();',
+	'$db = new CDatabase();',
+	"$row2 = $db->Query('select 1')->Fetch();",
+	'',
+].join('\n');
+send({
+	jsonrpc: '2.0',
+	method: 'textDocument/didOpen',
+	params: { textDocument: { uri: legacyDbUri, languageId: 'php', version: 1, text: legacyDbText } },
+});
+const legacyDbDiagnostics = await waitFor(
+	(message) => message.method === 'textDocument/publishDiagnostics' && message.params.uri === legacyDbUri,
+);
+const legacyDbUnknown = (legacyDbDiagnostics?.params?.diagnostics ?? [])
+	.filter((item) => item.code === 'bitrix.php.unknown-method' || item.code === 'bitrix.php.unknown-function')
+	.map((item) => String(item.message));
+check(legacyDbUnknown.length === 0, `PHP: CDatabase::Query/return $res → CDBResult (${legacyDbUnknown.join('; ')})`);
 
 // --- Типы, чейнинг с переносами, иерархия, объявления ---
 const askLsp = async (method, params) => {

@@ -100,6 +100,12 @@ final class PhpMethodResolver
 		$context ??= PhpDocumentContext::create($document);
 		if ($operator === '->') {
 			$receiverText = $this->lastExpression(substr($before, 0, $receiverEnd));
+			// Приведение типа — не часть получателя: `(int)$user->getId()`.
+			$receiverText = preg_replace(
+				'/^\(\s*(?:int|integer|float|double|string|bool|boolean|array|object|unset|binary)\s*\)\s*/i',
+				'',
+				$receiverText,
+			) ?? $receiverText;
 			if (str_contains($receiverText, '(') || str_contains($receiverText, '->')) {
 				$candidates = $this->inference->expressionCandidatesFor($context, $receiverText, $offset);
 				if ($candidates !== []) {
@@ -144,6 +150,11 @@ final class PhpMethodResolver
 			}
 			if ($char === '(') {
 				$depth--;
+				if ($depth < 0) {
+					// Вышли за скобку, внутри которой начинался получатель:
+					// `f((int)$x)->` — получатель `(int)$x`, а не весь вызов `f(...)`.
+					break;
+				}
 				$start = $i;
 				continue;
 			}
